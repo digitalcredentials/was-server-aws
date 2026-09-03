@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Wallet Attached Storage API
+
+Globals:
+  Function:
+    Timeout: 3
+    Runtime: nodejs24.x
+
+Resources:
+  # Unused since verifyZcap moved into src/authorizer and its deps were bundled
+  # into that function. Nothing imports /opt/nodejs/dcc-shared-layer-utils any
+  # more. The source is still in src/sharedLayer/ if this needs to come back.
+  # DCCSharedLayer:
+  #   Type: AWS::Serverless::LayerVersion
+  #   Properties:
+  #     ContentUri: src/sharedLayer/
+  #     CompatibleRuntimes:
+  #       - nodejs24.x
+  #   Metadata:
+  #     # gotta use a makefile because layers can't be built with esbuild, only functions can,
+  #     # and we need esbuild to use ESM modules and CJS modules together.
+  #     BuildMethod: makefile
+
+
+  # The shared API Gateway
+  WASApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Auth:
+        DefaultAuthorizer: WASZcapAuthorizer
+        # CORS preflight carries no Authorization header, so it must stay public
+        # or the browser never gets as far as the real request.
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          WASZcapAuthorizer:
+            FunctionPayloadType: REQUEST
+            FunctionArn: !GetAtt WASZcapAuthorizerFn.Arn
+            Identity:
+              Headers:
+                - Authorization
+              # Every zcap invocation is signed over its own request, so a
+              # cached authorization decision would be meaningless. 0 disables
+              # the authorizer result cache.
+              ReauthorizeEvery: 0
+      Cors:
+        AllowMethods: "'GET,PUT,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,capability-invocation'"
+        AllowOrigin: "'*'"
+
+  # Verifies the zcap invocation for every route on WASApi.
+  WASZcapAuthorizerFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/authorizer
+      Handler: app.lambdaHandler
+      # No layer: the zcap verification deps are bundled into the function.
+      Timeout: 10
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2022"
+        Format: "esm"
+        Platform: "node"
+        OutExtension:
+          - .js=.mjs
+        EntryPoints:
+          - app.mjs
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
+  CollectionsGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/collections/get
+      Handler: app.lambdaHandler
+      # Layers:
+      #   - !Ref DCCSharedLayer # References the layer above
+      Policies:
+        - S3ReadPolicy:
+            BucketName: '*'
+      Events:
+        GetCollection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WASApi
+            Path: /space/{space_id}/{collection_id}
+            Method: get
+  
+  SpaceCollectionsListGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/spaces/get
+      Handler: app.lambdaHandler
+      # Layers:
+      #   - !Ref DCCSharedLayer # References the layer above
+      Policies:
+        - S3ReadPolicy:
+            BucketName: '*'
+      Events:
+        GetCollection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WASApi
+            Path: /space/{space_id}/collections
+            Method: get
+
+  SpaceDescriptionGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/spaces/description/get
+      Handler: app.lambdaHandler
+      # Layers:
+      #   - !Ref DCCSharedLayer # References the layer above
+      Policies:
+        - S3ReadPolicy:
+            BucketName: '*'
+      Events:
+        GetSpaceDescription:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WASApi
+            Path: /space/{space_id}
+            Method: get
+
+
+
+Outputs:
+  WASZcapAuthorizerFn:
+    Description: zCap REQUEST authorizer Lambda Function ARN
+    Value: !GetAtt WASZcapAuthorizerFn.Arn
+  WASZcapAuthorizerFnIamRole:
+    Description: Implicit IAM Role created for the zCap authorizer function
+    Value: !GetAtt WASZcapAuthorizerFnRole.Arn
+  CollectionsApi:
+    Description: API Gateway endpoint URL for Collections endpoint of WAS API
+    Value: !Sub https://${WASApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/space/{space_id}/{collection_id}
+  ResourcesApi:
+    Description: API Gateway endpoint URL for Resources endpoint of WAS API
+    Value: !Sub https://${WASApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/space/{space_id}/{collection_id}/{resource_id}
+  ApiEndpoint:
+    Description: "API Gateway HTTP backend URL"
+    Value: !Sub "https://${WASApi}.execute-api.${AWS::Region}://"
+  CollectionsGetFn:
+    Description: GET Collections Lambda Function ARN
+    Value: !GetAtt CollectionsGetFn.Arn
+  CollectionsGetFnIamRole:
+    Description: Implicit IAM Role created for GET Collections function
+    Value: !GetAtt CollectionsGetFnRole.Arn
+  SpaceCollectionsListGetFn:
+    Description: GET Space collections list Lambda Function ARN
+    Value: !GetAtt SpaceCollectionsListGetFn.Arn
+  SpaceCollectionsListGetFnIamRole:
+    Description: Implicit IAM Role created for GET Space collections list function
+    Value: !GetAtt SpaceCollectionsListGetFnRole.Arn
+  SpaceDescriptionApi:
+    Description: API Gateway endpoint URL for the Space description endpoint of WAS API
+    Value: !Sub https://${WASApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/space/{space_id}
+  SpaceDescriptionGetFn:
+    Description: GET Space description Lambda Function ARN
+    Value: !GetAtt SpaceDescriptionGetFn.Arn
+  SpaceDescriptionGetFnIamRole:
+    Description: Implicit IAM Role created for GET Space description function
+    Value: !GetAtt SpaceDescriptionGetFnRole.Arn

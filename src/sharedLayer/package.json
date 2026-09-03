@@ -1,0 +1,16 @@
+{
+  "name": "dcc-shared-layer",
+  "version": "1.0.0",
+  "description": "DCC shared layer for Node.js",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0"
+  },
+  "dependencies": {
+    "@interop/security-document-loader": "^10.0.4",
+    "@interop/http-signature-zcap-verify": "^12.2.1",
+    "@interop/did-method-key": "^7.3.5",
+    "@interop/ed25519-verification-key": "^8.0.4",
+    "@interop/ed25519-signature": "^7.1.4"
+  }
+}
