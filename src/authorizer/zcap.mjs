@@ -21,27 +21,23 @@ const baseDocumentLoader = securityLoader()
 const dynamoClient = new DynamoDBClient()
 const TABLE_NAME = process.env.TABLE_NAME ?? 'wallet-test'
 
-// The space id is the path segment after /space
-function getSpaceId(path) {
-  const segments = path.split('/').filter(Boolean)
-  const spaceIndex = segments.indexOf('space')
-  return spaceIndex === -1 ? undefined : segments[spaceIndex + 1]
+// The space URL is everything in the request URL up to and including the
+// {space_id} segment, matching the spaceURL registered for the account.
+function getSpaceUrl(url) {
+  const match = url.match(/^(.*?\/space\/[^/?#]+)/)
+  return match?.[1]
 }
 
 // Looks up the DID registered for the space in the accounts table. The table
-// is keyed by email and stores the full space URL, so filter on the URL's
-// trailing /space/<spaceId> segment.
-async function getSpaceControllerDid(spaceId) {
+// is keyed by email, so filter on an exact match of the stored space URL.
+async function getSpaceControllerDid(spaceUrl) {
   const { Items: items = [] } = await dynamoClient.send(new ScanCommand({
     TableName: TABLE_NAME,
-    FilterExpression: 'contains(spaceURL, :spaceId)',
-    ExpressionAttributeValues: { ':spaceId': { S: spaceId } }
+    FilterExpression: 'spaceURL = :spaceUrl',
+    ExpressionAttributeValues: { ':spaceUrl': { S: spaceUrl } }
   }))
-  const account = items.find(
-    item => (item.spaceURL?.S ?? '').endsWith(`/space/${spaceId}`)
-  )
   // Registered DIDs may carry a key fragment (did:key:z6Mk...#z6Mk...)
-  return account?.did?.S?.split('#')[0]
+  return items[0]?.did?.S?.split('#')[0]
 }
 
 function rootCapabilityLoader(spaceController) {
@@ -98,13 +94,13 @@ async function getVerifier({ keyId }) {
     // The root capability for the space is controlled by the DID registered
     // for it in the accounts table, so verification rejects invocations
     // signed by any other key.
-    const spaceId = getSpaceId(path)
-    if (!spaceId) {
-      throw new Error(`No space id in request path: ${path}`)
+    const spaceUrl = getSpaceUrl(url)
+    if (!spaceUrl) {
+      throw new Error(`No space URL in request URL: ${url}`)
     }
-    const spaceController = await getSpaceControllerDid(spaceId)
+    const spaceController = await getSpaceControllerDid(spaceUrl)
     if (!spaceController) {
-      throw new Error(`No account registered for space: ${spaceId}`)
+      throw new Error(`No account registered for space: ${spaceUrl}`)
     }
 
     const result = await verifyCapabilityInvocation({
