@@ -57,6 +57,14 @@ Resources:
       Handler: app.lambdaHandler
       # No layer: the zcap verification deps are bundled into the function.
       Timeout: 10
+      Environment:
+        Variables:
+          # Accounts table (owned by the lcw-back-end stack): maps each
+          # account's email to its registered did and spaceURL.
+          TABLE_NAME: wallet-test
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: wallet-test
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -64,6 +72,8 @@ Resources:
         Target: "es2022"
         Format: "esm"
         Platform: "node"
+        External:
+          - "@aws-sdk/*"
         OutExtension:
           - .js=.mjs
         EntryPoints:

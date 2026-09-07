@@ -8,6 +8,7 @@ import {
 import * as didKey from '@interop/did-method-key'
 import { Ed25519VerificationKey } from '@interop/ed25519-verification-key'
 import { Ed25519Signature2020 } from '@interop/ed25519-signature'
+import { DynamoDBClient, ScanCommand } from '@aws-sdk/client-dynamodb'
 
 const didKeyDriver = didKey.driver()
 didKeyDriver.use({
@@ -17,16 +18,33 @@ didKeyDriver.use({
 
 const baseDocumentLoader = securityLoader()
 
-const testSeed = 'my-secret-seed-that-is-long-enou';
-const keyPair = await Ed25519VerificationKey.generate({
-    seed: new TextEncoder().encode(testSeed)
-})
-  //keyPair.controller = `did:key:${keyPair.fingerprint()}`
-  //keyPair.id = `${keyPair.controller}#${keyPair.fingerprint()}`
+const dynamoClient = new DynamoDBClient()
+const TABLE_NAME = process.env.TABLE_NAME ?? 'wallet-test'
 
-const spaceController = `did:key:${keyPair.fingerprint()}`;
+// The space id is the path segment after /space
+function getSpaceId(path) {
+  const segments = path.split('/').filter(Boolean)
+  const spaceIndex = segments.indexOf('space')
+  return spaceIndex === -1 ? undefined : segments[spaceIndex + 1]
+}
 
-function rootCapabilityLoader() {
+// Looks up the DID registered for the space in the accounts table. The table
+// is keyed by email and stores the full space URL, so filter on the URL's
+// trailing /space/<spaceId> segment.
+async function getSpaceControllerDid(spaceId) {
+  const { Items: items = [] } = await dynamoClient.send(new ScanCommand({
+    TableName: TABLE_NAME,
+    FilterExpression: 'contains(spaceURL, :spaceId)',
+    ExpressionAttributeValues: { ':spaceId': { S: spaceId } }
+  }))
+  const account = items.find(
+    item => (item.spaceURL?.S ?? '').endsWith(`/space/${spaceId}`)
+  )
+  // Registered DIDs may carry a key fragment (did:key:z6Mk...#z6Mk...)
+  return account?.did?.S?.split('#')[0]
+}
+
+function rootCapabilityLoader(spaceController) {
   const loader = baseDocumentLoader.clone()
 
   loader.setProtocolHandler({
@@ -77,6 +95,18 @@ async function getVerifier({ keyId }) {
     // The invoked capability's target should match the resource actually being requested.
     const url = proto + '://' + host + path
 
+    // The root capability for the space is controlled by the DID registered
+    // for it in the accounts table, so verification rejects invocations
+    // signed by any other key.
+    const spaceId = getSpaceId(path)
+    if (!spaceId) {
+      throw new Error(`No space id in request path: ${path}`)
+    }
+    const spaceController = await getSpaceControllerDid(spaceId)
+    if (!spaceController) {
+      throw new Error(`No account registered for space: ${spaceId}`)
+    }
+
     const result = await verifyCapabilityInvocation({
       url,
       method: httpMethod,
@@ -84,7 +114,7 @@ async function getVerifier({ keyId }) {
       headers: { ...headers, authorization: getHeader(headers, 'Authorization') },
       suite: new Ed25519Signature2020(),
       getVerifier,
-      documentLoader: rootCapabilityLoader(),
+      documentLoader: rootCapabilityLoader(spaceController),
       expectedHost: host,
       expectedAction: httpMethod,
       expectedTarget: url,
