@@ -1,0 +1,37 @@
+{
+  "resource": "/space/{space_id}/{collection_id}",
+  "path": "/space/dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c/credentials",
+  "httpMethod": "PUT",
+  "headers": {
+    "host": "localhost:3000",
+    "accept": "application/json",
+    "X-Forwarded-Proto": "http",
+    "content-type": "application/json"
+  },
+  "queryStringParameters": null,
+  "multiValueQueryStringParameters": null,
+  "pathParameters": {
+    "space_id": "dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c",
+    "collection_id": "credentials"
+  },
+  "stageVariables": null,
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "abcdef1234",
+    "domainName": "abcdef1234.execute-api.us-east-1.amazonaws.com",
+    "httpMethod": "PUT",
+    "path": "/Prod/space/dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c/credentials",
+    "protocol": "HTTP/1.1",
+    "requestId": "c6af9ac6-7b61-11e6-9a41-93e8deadbeef",
+    "resourceId": "abcdef",
+    "resourcePath": "/space/{space_id}/{collection_id}",
+    "stage": "Prod",
+    "authorizer": {
+      "controller": "did:key:z6MkuoW15WTT6ty3coLfS294WKdndim1fteTWK76dMGVUUxk",
+      "capability": "urn:zcap:root:http%3A%2F%2Flocalhost%3A3000%2Fspace%2Fdcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c%2Fcredentials",
+      "capabilityAction": "PUT"
+    }
+  },
+  "body": "{\"id\":\"credentials\",\"type\":[\"Collection\"],\"name\":\"JSON Documents Collection\"}",
+  "isBase64Encoded": false
+}

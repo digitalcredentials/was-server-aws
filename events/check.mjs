@@ -1,11 +1,28 @@
 // Signs a fresh invocation for every route and runs it through the real
-// authorizer, in process. No files, no Docker.
+// authorizer, in process. No files, no Docker, no AWS: the accounts-table
+// lookup is stubbed below, so this checks the verification logic rather than
+// live table state.
 //
 //   cd events && npm test
+
+import { createRequire } from "node:module";
 
 import { lambdaHandler } from "../src/authorizer/app.mjs";
 import { controller, signedAuthorizerEvent } from "./sign.mjs";
 import { routes } from "./routes.mjs";
+
+// The authorizer resolves the space's controller DID from DynamoDB
+// (getSpaceControllerDid in src/authorizer/zcap.mjs). Stub the client it uses
+// - resolved from the authorizer's own node_modules - to register the test
+// signing key as every space's controller, complete with the key fragment the
+// real table rows carry, so the fragment-stripping stays exercised.
+const authorizerRequire = createRequire(
+  new URL("../src/authorizer/app.mjs", import.meta.url)
+);
+const { DynamoDBClient } = authorizerRequire("@aws-sdk/client-dynamodb");
+DynamoDBClient.prototype.send = async () => ({
+  Items: [{ did: { S: `${controller}#${controller.slice("did:key:".length)}` } }],
+});
 
 let failures = 0;
 
