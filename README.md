@@ -139,16 +139,24 @@ src/
 ├── spaces/
 │   ├── description/get/   GET /space/{space_id}
 │   └── get/               GET /space/{space_id}/collections
-├── collections/get/       GET /space/{space_id}/{collection_id}
-├── resources/put/         PUT handler — NOT currently in template.yaml
+├── collections/
+│   ├── get/               GET /space/{space_id}/{collection_id}
+│   └── put/               PUT /space/{space_id}/{collection_id}
+├── resources/
+│   ├── get/               GET /space/{space_id}/{collection_id}/{resource_id}
+│   └── put/               PUT /space/{space_id}/{collection_id}/{resource_id}
 └── sharedLayer/           dead code; commented out of template.yaml
 events/
 ├── routes.mjs             shared route table + event scaffolding
 ├── sign.mjs               prints a freshly-signed authorizer event to stdout
 ├── generate.mjs           rewrites the static proxy fixtures
 ├── check.mjs              signs fresh + runs the real authorizer (npm test)
+├── handlers.test.mjs      in-process route handler tests, S3 stubbed (npm test)
 └── *.json                 static, unsigned proxy events
 template.yaml              all AWS resources
+package.json               root test script + @aws-sdk/client-s3 devDependency
+                           (Lambda provides the SDK at runtime; handler tests
+                           resolve this local copy)
 ```
 
 ### Build notes
@@ -164,7 +172,7 @@ third-party dependencies, so it is the only one that needs bundling:
 It also overrides the 3s `Globals` timeout to 10s, because a cold start does DID
 resolution and Ed25519 verification.
 
-The three S3 handlers use SAM's default Node.js builder, which copies the source
+The S3 handlers use SAM's default Node.js builder, which copies the source
 as-is. They import nothing but `@aws-sdk/client-s3`, which
 [every supported Node.js runtime provides](https://docs.aws.amazon.com/lambda/latest/dg/lambda-nodejs.html#nodejs-sdk-included),
 so there is nothing to bundle. `.mjs` files are treated as ESM by Node
@@ -231,21 +239,23 @@ node sign.mjs space-description-get --invalid | sam local invoke WASZcapAuthoriz
 ```
 
 Routes: `space-description-get`, `space-collections-list-get`,
-`collection-list-get`, `collection-description-get`. `--invalid` corrupts the
-signature to exercise the 401 path. Diagnostics go to stderr, so the pipe stays
-clean.
+`collection-list-get`, `collection-description-get`, `collection-put`,
+`resource-put`, `resource-get`. `--invalid` corrupts the signature to exercise
+the 401 path. Diagnostics go to stderr, so the pipe stays clean.
 
 Signing on demand avoids the trap that static signed fixtures fall into: the
 signer sets `expires` to `created + 600` and the signature covers the
 `(expires)` pseudo-header, so a stored signed event stops verifying ten minutes
 after it is written. A fresh one is always inside that window.
 
-The signer uses the **same `testSeed`** as
-[src/authorizer/zcap.mjs](src/authorizer/zcap.mjs). That matters: the seed
-derives `spaceController`, the controller of every root capability, so signing
-with it makes the invoker the controller and the invocation verifies. A
-signature also covers `(request-target)` and `host`, so it is bound to one route
-and one host — it is not reusable across paths.
+The authorizer resolves each space's controller DID from the accounts table
+([src/authorizer/zcap.mjs](src/authorizer/zcap.mjs)), and only an invocation
+signed by that DID verifies. `check.mjs` stubs the lookup so the test signing
+key is always the registered controller; to exercise a real deployment with
+`sign.mjs`, the account for `SPACE_ID` must be registered with the DID the test
+seed derives. A signature also covers `(request-target)` and `host`, so it is
+bound to one route and one host — it is not reusable across paths. Routes with
+a body additionally get a signed `digest` header over the JSON payload.
 
 ### Proxy events — static, unsigned
 
@@ -255,6 +265,9 @@ and one host — it is not reusable across paths.
 | `space-collections-list-get.json` | `GET /space/{space_id}/collections` |
 | `collection-list-get.json` | collection listing (trailing slash) |
 | `collection-description-get.json` | collection description (no trailing slash) |
+| `collection-put.json` | `PUT /space/{space_id}/{collection_id}` |
+| `resource-put.json` | `PUT /space/{space_id}/{collection_id}/{resource_id}` |
+| `resource-get.json` | `GET /space/{space_id}/{collection_id}/{resource_id}` |
 
 These are what a route handler sees, for invoking one directly:
 
@@ -273,15 +286,28 @@ Rewrite them with `npm run generate` after changing a route or path.
 ### Checking it all works
 
 ```bash
-npm test
+npm test        # from the repo root or from events/
 ```
 
+Running it from the repo root needs a one-time `npm install` there too (it
+provides the `@aws-sdk/client-s3` the handler tests resolve).
+
 [events/check.mjs](events/check.mjs) signs a fresh invocation for each route and
-runs it through the real authorizer in process — no files, no Docker. It asserts
-that each returns `Allow` scoped to the right `methodArn`, that a tampered
-signature throws exactly `Unauthorized` (the message API Gateway maps to a 401),
-and that the controller embedded in the static proxy fixtures still matches the
-key the signer derives, so a seed change cannot leave them quietly stale.
+runs it through the real authorizer in process — no files, no Docker, no AWS
+(the accounts-table lookup is stubbed to register the test key as the space's
+controller). It asserts that each route returns `Allow` scoped to the right
+`methodArn`, that a tampered signature throws exactly `Unauthorized` (the
+message API Gateway maps to a 401), and that the controller embedded in the
+static proxy fixtures still matches the key the signer derives, so a seed change
+cannot leave them quietly stale.
+
+[events/handlers.test.mjs](events/handlers.test.mjs) then runs every route
+handler in process on `node --test`, feeding it the same proxy events the
+fixtures are generated from and stubbing `S3Client.prototype.send` per test. It
+covers the happy paths (listings, descriptions, resource reads) and the write
+semantics: 201-with-`Location` vs 204 on PUT, `ETag` passthrough, base64 body
+decoding, the 400s for malformed collection descriptions, the reserved
+`description.json` key, and the `NoSuchBucket`/`NoSuchKey` 404s.
 
 The signing key is a throwaway for a seed that is already public in this repo.
 Never point it at a real deployment.

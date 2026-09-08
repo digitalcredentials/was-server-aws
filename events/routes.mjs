@@ -6,6 +6,7 @@ export const PROTO = "http";
 
 export const SPACE_ID = "dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c";
 export const COLLECTION_ID = "credentials";
+export const RESOURCE_ID = "credential-1.json";
 
 // Placeholders; API Gateway fills these in for real requests.
 export const API_ID = "abcdef1234";
@@ -39,6 +40,46 @@ export const routes = {
     path: `/space/${SPACE_ID}/${COLLECTION_ID}`,
     method: "GET",
     pathParameters: { space_id: SPACE_ID, collection_id: COLLECTION_ID },
+  },
+  // Update-or-create the collection's description document.
+  "collection-put": {
+    resource: "/space/{space_id}/{collection_id}",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}`,
+    method: "PUT",
+    pathParameters: { space_id: SPACE_ID, collection_id: COLLECTION_ID },
+    contentType: "application/json",
+    body: JSON.stringify({
+      id: COLLECTION_ID,
+      type: ["Collection"],
+      name: "JSON Documents Collection",
+    }),
+  },
+  // Update-or-create a resource in the collection.
+  "resource-put": {
+    resource: "/space/{space_id}/{collection_id}/{resource_id}",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}/${RESOURCE_ID}`,
+    method: "PUT",
+    pathParameters: {
+      space_id: SPACE_ID,
+      collection_id: COLLECTION_ID,
+      resource_id: RESOURCE_ID,
+    },
+    contentType: "application/json",
+    body: JSON.stringify({
+      name: "A stored credential",
+      issuanceDate: "2026-01-01T00:00:00Z",
+    }),
+  },
+  // Read a resource back from the collection.
+  "resource-get": {
+    resource: "/space/{space_id}/{collection_id}/{resource_id}",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}/${RESOURCE_ID}`,
+    method: "GET",
+    pathParameters: {
+      space_id: SPACE_ID,
+      collection_id: COLLECTION_ID,
+      resource_id: RESOURCE_ID,
+    },
   },
 };
 
@@ -90,7 +131,7 @@ export function authorizerEvent(route, headers) {
 
 // An API Gateway REST proxy-integration event, as a route handler sees it.
 export function proxyEvent(route, { controller, capability }) {
-  const { resource, path, method, pathParameters } = route;
+  const { resource, path, method, pathParameters, body, contentType } = route;
   return {
     resource,
     path,
@@ -99,6 +140,7 @@ export function proxyEvent(route, { controller, capability }) {
       host: HOST,
       accept: "application/json",
       "X-Forwarded-Proto": PROTO,
+      ...(contentType && { "content-type": contentType }),
     },
     queryStringParameters: null,
     multiValueQueryStringParameters: null,
@@ -109,7 +151,7 @@ export function proxyEvent(route, { controller, capability }) {
       // Produced by WASZcapAuthorizerFn, which has already run by this point.
       authorizer: { controller, capability, capabilityAction: method },
     },
-    body: null,
+    body: body ?? null,
     isBase64Encoded: false,
   };
 }

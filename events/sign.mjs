@@ -14,9 +14,11 @@ import { Ed25519VerificationKey } from "@interop/ed25519-verification-key";
 
 import { authorizerEvent, routeOrDie, routes, targetUrl } from "./routes.mjs";
 
-// Must match src/authorizer/zcap.mjs: this seed derives `spaceController`, the
-// controller of every root capability, so signing with it makes the invoker the
-// controller and the invocation verifies.
+// The authorizer looks up each space's controller DID in the accounts table
+// (see src/authorizer/zcap.mjs). For a signature from this seed to verify, the
+// key it derives must be that registered DID: check.mjs stubs the lookup to
+// return exactly this key's controller; against a real deployment the account
+// for SPACE_ID has to be registered with it.
 const TEST_SEED = "my-secret-seed-that-is-long-enou";
 
 const keyPair = await Ed25519VerificationKey.generate({
@@ -33,11 +35,13 @@ export async function signedHeaders(route) {
   const url = targetUrl(route);
   // `capability` defaults to `urn:zcap:root:<encoded url>`, which is exactly the
   // root capability the authorizer expects. The signature covers
-  // `(request-target)` and `host`, so it is bound to this one route.
+  // `(request-target)` and `host`, so it is bound to this one route. Routes
+  // with a body also get a digest header signed over the JSON payload.
   const signed = await signCapabilityInvocation({
     url,
     method: route.method,
     headers: { host: new URL(url).host, accept: "application/json" },
+    ...(route.body != null && { json: JSON.parse(route.body) }),
     capabilityAction: route.method,
     invocationSigner,
   });

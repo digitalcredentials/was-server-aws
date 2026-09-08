@@ -1,13 +1,13 @@
 {
   "name": "was-test-events",
   "version": "1.0.0",
-  "description": "Generates signed API Gateway test events for the WAS API",
+  "description": "Test events and in-process tests for the WAS API",
   "type": "module",
   "private": true,
   "scripts": {
     "generate": "node generate.mjs",
     "sign": "node sign.mjs",
-    "test": "node check.mjs"
+    "test": "node check.mjs && node --test handlers.test.mjs"
   },
   "dependencies": {
     "@interop/http-signature-zcap-invoke": "^6.2.6",
