@@ -135,6 +135,64 @@ Resources:
             Path: /space/{space_id}
             Method: get
 
+  # Update-or-create a collection description by id.
+  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#update-or-create-by-id-collection-operation
+  CollectionsPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/collections/put
+      Handler: app.lambdaHandler
+      Policies:
+        # Crud (not Write) because the handler HeadObjects first to decide
+        # between 201 Created and 204 No Content.
+        - S3CrudPolicy:
+            BucketName: '*'
+      Events:
+        PutCollection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WASApi
+            Path: /space/{space_id}/{collection_id}
+            Method: put
+
+  # Update-or-create a resource in a collection.
+  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#http-api-put-space-space_id-collection_id-resource_id
+  ResourcesPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/resources/put
+      Handler: app.lambdaHandler
+      Policies:
+        # Crud (not Write) because the handler HeadObjects first to decide
+        # between 201 Created and 204 No Content.
+        - S3CrudPolicy:
+            BucketName: '*'
+      Events:
+        PutResource:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WASApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}
+            Method: put
+
+  # Read a resource from a collection.
+  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#http-api-get-space-space_id-collection_id-resource_id
+  ResourcesGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/resources/get
+      Handler: app.lambdaHandler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: '*'
+      Events:
+        GetResource:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WASApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}
+            Method: get
+
 
 
 Outputs:
@@ -174,3 +232,21 @@ Outputs:
   SpaceDescriptionGetFnIamRole:
     Description: Implicit IAM Role created for GET Space description function
     Value: !GetAtt SpaceDescriptionGetFnRole.Arn
+  CollectionsPutFn:
+    Description: PUT Collection Lambda Function ARN
+    Value: !GetAtt CollectionsPutFn.Arn
+  CollectionsPutFnIamRole:
+    Description: Implicit IAM Role created for PUT Collection function
+    Value: !GetAtt CollectionsPutFnRole.Arn
+  ResourcesPutFn:
+    Description: PUT Resource Lambda Function ARN
+    Value: !GetAtt ResourcesPutFn.Arn
+  ResourcesPutFnIamRole:
+    Description: Implicit IAM Role created for PUT Resource function
+    Value: !GetAtt ResourcesPutFnRole.Arn
+  ResourcesGetFn:
+    Description: GET Resource Lambda Function ARN
+    Value: !GetAtt ResourcesGetFn.Arn
+  ResourcesGetFnIamRole:
+    Description: Implicit IAM Role created for GET Resource function
+    Value: !GetAtt ResourcesGetFnRole.Arn
