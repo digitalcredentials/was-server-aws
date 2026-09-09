@@ -45,7 +45,7 @@ Resources:
               # the authorizer result cache.
               ReauthorizeEvery: 0
       Cors:
-        AllowMethods: "'GET,PUT,OPTIONS'"
+        AllowMethods: "'GET,PUT,DELETE,OPTIONS'"
         # digest is sent on signed requests with a body (PUT); without it the
         # browser rejects the CORS preflight for uploads.
         AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,capability-invocation,digest'"
@@ -195,7 +195,26 @@ Resources:
             Path: /space/{space_id}/{collection_id}/{resource_id}
             Method: get
 
-
+  # Delete a resource: moves it into the space's Trash collection (a delete
+  # from Trash itself removes it permanently).
+  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#http-api-delete-space-space_id-collection_id-resource_id
+  ResourcesDeleteFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/resources/delete
+      Handler: app.lambdaHandler
+      Policies:
+        # Crud: the soft delete copies the object into Trash (read + write)
+        # before removing the original.
+        - S3CrudPolicy:
+            BucketName: '*'
+      Events:
+        DeleteResource:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WASApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}
+            Method: delete
 
 Outputs:
   WASZcapAuthorizerFn:
