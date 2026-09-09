@@ -33,7 +33,7 @@ export const lambdaHandler = async (event, context) => {
   const key = `collections/${collection_id}/${resource_id}`;
 
   try {
-    // 201 when the PUT creates the resource, 204 when it updates one.
+    // 201 when the PUT creates the resource, 200 when it updates one.
     let exists = true;
     try {
       await s3.send(new HeadObjectCommand({ Bucket: space_id, Key: key }));
@@ -58,19 +58,26 @@ export const lambdaHandler = async (event, context) => {
       })
     );
 
-    const responseHeaders = { ...(ETag && { ETag }) };
-    if (exists) {
-      return { statusCode: 204, headers: responseHeaders, body: "" };
-    }
     const location = `/space/${space_id}/${collection_id}/${resource_id}`;
-    // API Gateway defaults the Content-Type to application/json, so a 201
-    // needs an actual JSON body or clients that trust the header fail to
-    // parse the empty string.
+    // Both branches carry a JSON body: API Gateway defaults the Content-Type
+    // to application/json, so an empty body (a 204, or a bodyless 201) breaks
+    // clients that trust the header and parse it. 200 for an update, 201 for
+    // a create.
+    const responseHeaders = {
+      ...(ETag && { ETag }),
+      "Content-Type": "application/json",
+    };
+    if (exists) {
+      return {
+        statusCode: 200,
+        headers: responseHeaders,
+        body: JSON.stringify({ url: location }),
+      };
+    }
     return {
       statusCode: 201,
       headers: {
         ...responseHeaders,
-        "Content-Type": "application/json",
         Location: location,
       },
       body: JSON.stringify({ url: location }),
