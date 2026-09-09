@@ -260,15 +260,18 @@ test("resource PUT: 201 with Location and ETag on create", async () => {
   assert.equal(stored, routes["resource-put"].body);
 });
 
-test("resource PUT: 204 with ETag on update", async () => {
+test("resource PUT: 200 with ETag and a JSON body on update", async () => {
   onSend = (command) => {
     if (command instanceof HeadObjectCommand) return {};
     return { ETag: '"etag-2"' };
   };
   const res = await resourcePut(event("resource-put"));
-  assert.equal(res.statusCode, 204);
+  assert.equal(res.statusCode, 200);
   assert.equal(res.headers.ETag, '"etag-2"');
-  assert.equal(res.body, "");
+  // API Gateway defaults the Content-Type to application/json, so the body
+  // must actually be JSON or clients that trust the header fail to parse it
+  assert.equal(res.headers["Content-Type"], "application/json");
+  assert.ok(JSON.parse(res.body).url);
 });
 
 test("resource PUT: decodes a base64 body before storing it", async () => {
