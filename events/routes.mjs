@@ -81,6 +81,17 @@ export const routes = {
       resource_id: RESOURCE_ID,
     },
   },
+  // Soft-delete a resource: moves it into the space's Trash collection.
+  "resource-delete": {
+    resource: "/space/{space_id}/{collection_id}/{resource_id}",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}/${RESOURCE_ID}`,
+    method: "DELETE",
+    pathParameters: {
+      space_id: SPACE_ID,
+      collection_id: COLLECTION_ID,
+      resource_id: RESOURCE_ID,
+    },
+  },
 };
 
 export function routeOrDie(name) {

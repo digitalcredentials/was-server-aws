@@ -18,6 +18,8 @@ import {
   PutObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
+  CopyObjectCommand,
+  DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 
 import {
@@ -34,6 +36,7 @@ import { lambdaHandler as collectionGet } from "../src/collections/get/app.mjs";
 import { lambdaHandler as collectionPut } from "../src/collections/put/app.mjs";
 import { lambdaHandler as resourcePut } from "../src/resources/put/app.mjs";
 import { lambdaHandler as resourceGet } from "../src/resources/get/app.mjs";
+import { lambdaHandler as resourceDelete } from "../src/resources/delete/app.mjs";
 
 const AUTH = {
   controller: "did:key:z6MkuoW15WTT6ty3coLfS294WKdndim1fteTWK76dMGVUUxk",
@@ -345,6 +348,66 @@ test("resource GET: refuses to serve the collection description", async () => {
   const route = routes["resource-get"];
   const res = await resourceGet(
     event("resource-get", {
+      pathParameters: { ...route.pathParameters, resource_id: "description.json" },
+    })
+  );
+  assert.equal(res.statusCode, 404);
+});
+
+test("resource DELETE: copies into Trash then removes the original", async () => {
+  const calls = [];
+  onSend = (command) => {
+    calls.push(command);
+    return {};
+  };
+  const res = await resourceDelete(event("resource-delete"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers["Content-Type"], "application/json");
+  const body = JSON.parse(res.body);
+  assert.equal(body.deleted, true);
+  assert.match(body.trash, /\/Trash\//);
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0] instanceof CopyObjectCommand);
+  assert.equal(calls[0].input.Key, `collections/Trash/${RESOURCE_ID}`);
+  assert.ok(calls[1] instanceof DeleteObjectCommand);
+  assert.equal(
+    calls[1].input.Key,
+    `collections/${COLLECTION_ID}/${RESOURCE_ID}`
+  );
+});
+
+test("resource DELETE from Trash: removes permanently without copying", async () => {
+  const calls = [];
+  onSend = (command) => {
+    calls.push(command);
+    return {};
+  };
+  const route = routes["resource-delete"];
+  const res = await resourceDelete(
+    event("resource-delete", {
+      pathParameters: { ...route.pathParameters, collection_id: "Trash" },
+    })
+  );
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).deleted, true);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0] instanceof DeleteObjectCommand);
+  assert.equal(calls[0].input.Key, `collections/Trash/${RESOURCE_ID}`);
+});
+
+test("resource DELETE: 404 when the resource does not exist", async () => {
+  onSend = () => {
+    throw s3Error("NoSuchKey");
+  };
+  const res = await resourceDelete(event("resource-delete"));
+  assert.equal(res.statusCode, 404);
+});
+
+test("resource DELETE: refuses to remove the collection description", async () => {
+  const route = routes["resource-delete"];
+  const res = await resourceDelete(
+    event("resource-delete", {
       pathParameters: { ...route.pathParameters, resource_id: "description.json" },
     })
   );
