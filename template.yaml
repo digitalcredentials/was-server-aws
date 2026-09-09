@@ -46,7 +46,9 @@ Resources:
               ReauthorizeEvery: 0
       Cors:
         AllowMethods: "'GET,PUT,OPTIONS'"
-        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,capability-invocation'"
+        # digest is sent on signed requests with a body (PUT); without it the
+        # browser rejects the CORS preflight for uploads.
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,capability-invocation,digest'"
         AllowOrigin: "'*'"
 
   # Verifies the zcap invocation for every route on WASApi.

@@ -62,13 +62,18 @@ export const lambdaHandler = async (event, context) => {
     if (exists) {
       return { statusCode: 204, headers: responseHeaders, body: "" };
     }
+    const location = `/space/${space_id}/${collection_id}/${resource_id}`;
+    // API Gateway defaults the Content-Type to application/json, so a 201
+    // needs an actual JSON body or clients that trust the header fail to
+    // parse the empty string.
     return {
       statusCode: 201,
       headers: {
         ...responseHeaders,
-        Location: `/space/${space_id}/${collection_id}/${resource_id}`,
+        "Content-Type": "application/json",
+        Location: location,
       },
-      body: "",
+      body: JSON.stringify({ url: location }),
     };
   } catch (err) {
     if (err.name === "NoSuchBucket") {
