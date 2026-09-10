@@ -104,63 +104,74 @@ export function routeOrDie(name) {
 }
 
 export function targetUrl({ path }) {
+  // The HTTP API serves the $default stage at the root, so the signed URL is
+  // simply proto://host+path -- the same locally and deployed.
   return `${PROTO}://${HOST}${path}`;
 }
 
-export function requestContext({ resource, method, path }) {
+// HTTP API payload v2 requestContext ($default stage serves at the root).
+export function requestContext({ method, path }) {
   return {
     accountId: ACCOUNT_ID,
     apiId: API_ID,
     domainName: `${API_ID}.execute-api.${REGION}.amazonaws.com`,
-    httpMethod: method,
-    path: `/${STAGE}${path}`,
-    protocol: "HTTP/1.1",
+    http: {
+      method,
+      path,
+      protocol: "HTTP/1.1",
+      sourceIp: "127.0.0.1",
+      userAgent: "was-test-events",
+    },
     requestId: "c6af9ac6-7b61-11e6-9a41-93e8deadbeef",
-    resourceId: "abcdef",
-    resourcePath: resource,
-    stage: STAGE,
+    routeKey: "$default",
+    stage: "$default",
   };
 }
 
-// An API Gateway REQUEST authorizer event, as WASZcapAuthorizerFn sees it.
-// Note there is no `requestContext.authorizer` - that is what it produces.
+// An HTTP API REQUEST authorizer event (payload v2), as WASZcapAuthorizerFn
+// sees it. Note there is no `requestContext.authorizer` - that is what it
+// produces.
 export function authorizerEvent(route, headers) {
   const { resource, path, method, pathParameters } = route;
+  const authorization =
+    headers.authorization ?? headers.Authorization ?? null;
   return {
+    version: "2.0",
     type: "REQUEST",
-    methodArn: `arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/${STAGE}/${method}${resource}`,
-    resource,
-    path,
-    httpMethod: method,
+    routeArn: `arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/$default/${method}${resource}`,
+    identitySource: authorization ? [authorization] : [],
+    routeKey: `${method} ${resource}`,
+    rawPath: path,
+    rawQueryString: "",
     headers,
-    queryStringParameters: null,
     pathParameters,
     stageVariables: null,
-    requestContext: requestContext({ resource, method, path }),
+    requestContext: requestContext({ method, path }),
   };
 }
 
-// An API Gateway REST proxy-integration event, as a route handler sees it.
+// An HTTP API proxy event (payload v2), as a route handler sees it.
 export function proxyEvent(route, { controller, capability }) {
   const { resource, path, method, pathParameters, body, contentType } = route;
   return {
-    resource,
-    path,
-    httpMethod: method,
+    version: "2.0",
+    routeKey: `${method} ${resource}`,
+    rawPath: path,
+    rawQueryString: "",
     headers: {
       host: HOST,
       accept: "application/json",
-      "X-Forwarded-Proto": PROTO,
+      "x-forwarded-proto": PROTO,
       ...(contentType && { "content-type": contentType }),
     },
     queryStringParameters: null,
-    multiValueQueryStringParameters: null,
     pathParameters,
     stageVariables: null,
     requestContext: {
-      ...requestContext({ resource, method, path }),
+      ...requestContext({ method, path }),
       // Produced by WASZcapAuthorizerFn, which has already run by this point.
-      authorizer: { controller, capability, capabilityAction: method },
+      // HTTP API nests lambda-authorizer context under `lambda`.
+      authorizer: { lambda: { controller, capability, capabilityAction: method } },
     },
     body: body ?? null,
     isBase64Encoded: false,

@@ -34,27 +34,27 @@ function report(name, ok, detail) {
 for (const name of Object.keys(routes)) {
   const event = await signedAuthorizerEvent(name);
   try {
+    // HTTP API simple response: { isAuthorized, context }
     const res = await lambdaHandler(event, {});
-    const statement = res.policyDocument.Statement[0];
     const ok =
-      statement.Effect === "Allow" &&
-      statement.Resource === event.methodArn &&
+      res.isAuthorized === true &&
       res.context.controller === controller &&
       res.context.capability.startsWith("urn:zcap:root:");
-    report(name, ok, `Effect=${statement.Effect} capability=${res.context.capability ? "set" : "EMPTY"}`);
+    report(name, ok, `isAuthorized=${res.isAuthorized} capability=${res.context?.capability ? "set" : "EMPTY"}`);
   } catch (err) {
     report(name, false, `threw "${err.message}"`);
   }
 }
 
-// A tampered signature must produce a 401, which API Gateway keys off this
-// exact message - not an Allow, and not a different error.
+// A tampered signature must produce a denial ({ isAuthorized: false }), which
+// API Gateway answers with a 403 - never an allow, and never a thrown error
+// (that would be a 500).
 const bad = await signedAuthorizerEvent("space-description-get", { invalid: true });
 try {
-  await lambdaHandler(bad, {});
-  report("tampered signature rejected", false, "returned a policy instead of throwing");
+  const res = await lambdaHandler(bad, {});
+  report("tampered signature rejected", res.isAuthorized === false, `isAuthorized=${res.isAuthorized}`);
 } catch (err) {
-  report("tampered signature rejected", err.message === "Unauthorized", `threw "${err.message}"`);
+  report("tampered signature rejected", false, `threw "${err.message}" instead of denying`);
 }
 
 // The static proxy fixtures embed the controller; make sure it still matches
@@ -64,8 +64,8 @@ const { default: proxy } = await import("./space-description-get.json", {
 });
 report(
   "proxy fixture controller matches signing key",
-  proxy.requestContext.authorizer.controller === controller,
-  proxy.requestContext.authorizer.controller
+  proxy.requestContext.authorizer.lambda.controller === controller,
+  proxy.requestContext.authorizer.lambda.controller
 );
 
 console.log(failures ? `\n${failures} check(s) failed` : "\nall checks passed");

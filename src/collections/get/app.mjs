@@ -15,7 +15,11 @@ const RESERVED_RESOURCE_IDS = new Set([
 ]);
 
 export const lambdaHandler = async (event, context) => {
-  const { httpMethod, pathParameters, path } = event;
+  const { pathParameters } = event;
+  // HTTP API payload v2: the method lives under requestContext.http and the
+  // path is rawPath
+  const httpMethod = event.requestContext?.http?.method ?? event.httpMethod;
+  const path = event.rawPath ?? event.path;
 
   // The zcap invocation was already verified by the WASZcapAuthorizer; the
   // invoker is on event.requestContext.authorizer.controller.

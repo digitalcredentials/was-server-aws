@@ -23,19 +23,21 @@ Resources:
   #     BuildMethod: makefile
 
 
-  # The shared API Gateway
-  WASApi:
-    Type: AWS::Serverless::Api
+  # The shared API Gateway. An HTTP API rather than a REST API: its CORS is a
+  # real gateway feature that injects the headers into every response (on a
+  # REST API only the OPTIONS preflight can be configured centrally; each
+  # proxied response would have to carry its own headers). It also serves the
+  # $default stage at the root, so URLs carry no /Prod prefix.
+  WASHttpApi:
+    Type: AWS::Serverless::HttpApi
     Properties:
-      StageName: Prod
       Auth:
         DefaultAuthorizer: WASZcapAuthorizer
-        # CORS preflight carries no Authorization header, so it must stay public
-        # or the browser never gets as far as the real request.
-        AddDefaultAuthorizerToCorsPreflight: false
         Authorizers:
           WASZcapAuthorizer:
-            FunctionPayloadType: REQUEST
+            AuthorizerPayloadFormatVersion: '2.0'
+            EnableSimpleResponses: true
+            EnableFunctionDefaultPermissions: true
             FunctionArn: !GetAtt WASZcapAuthorizerFn.Arn
             Identity:
               Headers:
@@ -44,14 +46,20 @@ Resources:
               # cached authorization decision would be meaningless. 0 disables
               # the authorizer result cache.
               ReauthorizeEvery: 0
-      Cors:
-        AllowMethods: "'GET,PUT,DELETE,OPTIONS'"
-        # digest is sent on signed requests with a body (PUT); without it the
-        # browser rejects the CORS preflight for uploads.
-        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,capability-invocation,digest'"
-        AllowOrigin: "'*'"
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - PUT
+          - DELETE
+          - OPTIONS
+        # '*' covers the signed headers (authorization, capability-invocation,
+        # digest, date) and anything a client adds later.
+        AllowHeaders:
+          - '*'
+        AllowOrigins:
+          - '*'
 
-  # Verifies the zcap invocation for every route on WASApi.
+  # Verifies the zcap invocation for every route on WASHttpApi.
   WASZcapAuthorizerFn:
     Type: AWS::Serverless::Function
     Properties:
@@ -95,9 +103,9 @@ Resources:
             BucketName: '*'
       Events:
         GetCollection:
-          Type: Api
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref WASApi
+            ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}
             Method: get
   
@@ -113,9 +121,9 @@ Resources:
             BucketName: '*'
       Events:
         GetCollection:
-          Type: Api
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref WASApi
+            ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/collections
             Method: get
 
@@ -131,9 +139,9 @@ Resources:
             BucketName: '*'
       Events:
         GetSpaceDescription:
-          Type: Api
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref WASApi
+            ApiId: !Ref WASHttpApi
             Path: /space/{space_id}
             Method: get
 
@@ -151,9 +159,9 @@ Resources:
             BucketName: '*'
       Events:
         PutCollection:
-          Type: Api
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref WASApi
+            ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}
             Method: put
 
@@ -171,9 +179,9 @@ Resources:
             BucketName: '*'
       Events:
         PutResource:
-          Type: Api
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref WASApi
+            ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}
             Method: put
 
@@ -189,9 +197,9 @@ Resources:
             BucketName: '*'
       Events:
         GetResource:
-          Type: Api
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref WASApi
+            ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}
             Method: get
 
@@ -210,9 +218,9 @@ Resources:
             BucketName: '*'
       Events:
         DeleteResource:
-          Type: Api
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref WASApi
+            ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}
             Method: delete
 
@@ -225,13 +233,13 @@ Outputs:
     Value: !GetAtt WASZcapAuthorizerFnRole.Arn
   CollectionsApi:
     Description: API Gateway endpoint URL for Collections endpoint of WAS API
-    Value: !Sub https://${WASApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/space/{space_id}/{collection_id}
+    Value: !Sub https://${WASHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/space/{space_id}/{collection_id}
   ResourcesApi:
     Description: API Gateway endpoint URL for Resources endpoint of WAS API
-    Value: !Sub https://${WASApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/space/{space_id}/{collection_id}/{resource_id}
+    Value: !Sub https://${WASHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/space/{space_id}/{collection_id}/{resource_id}
   ApiEndpoint:
     Description: "API Gateway HTTP backend URL"
-    Value: !Sub "https://${WASApi}.execute-api.${AWS::Region}://"
+    Value: !Sub "https://${WASHttpApi}.execute-api.${AWS::Region}://"
   CollectionsGetFn:
     Description: GET Collections Lambda Function ARN
     Value: !GetAtt CollectionsGetFn.Arn
@@ -246,7 +254,7 @@ Outputs:
     Value: !GetAtt SpaceCollectionsListGetFnRole.Arn
   SpaceDescriptionApi:
     Description: API Gateway endpoint URL for the Space description endpoint of WAS API
-    Value: !Sub https://${WASApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/space/{space_id}
+    Value: !Sub https://${WASHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/space/{space_id}
   SpaceDescriptionGetFn:
     Description: GET Space description Lambda Function ARN
     Value: !GetAtt SpaceDescriptionGetFn.Arn
