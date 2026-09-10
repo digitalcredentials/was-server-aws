@@ -29,10 +29,15 @@ export const lambdaHandler = async (event, context) => {
     };
   }
 
-  // A collection description must at least declare itself a Collection.
-  const types = Array.isArray(description?.type)
+  // A collection description must declare itself a Collection; a description
+  // without a type (the was-client's configure() sends only the writable
+  // fields) gets the type stamped rather than rejected.
+  if (description?.type === undefined) {
+    description = { ...description, type: ["Collection"] };
+  }
+  const types = Array.isArray(description.type)
     ? description.type
-    : [description?.type];
+    : [description.type];
   if (!types.includes("Collection")) {
     return {
       statusCode: 400,
@@ -74,7 +79,14 @@ export const lambdaHandler = async (event, context) => {
     );
 
     if (exists) {
-      return { statusCode: 204, body: "" };
+      // 200 with a JSON body rather than an empty 204: API Gateway defaults
+      // the Content-Type to application/json, and clients that trust the
+      // header fail to parse an empty string.
+      return {
+        statusCode: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(stored),
+      };
     }
     return {
       statusCode: 201,

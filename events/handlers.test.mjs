@@ -209,15 +209,30 @@ test("collection PUT: 201 with Location and stamped description on create", asyn
   assert.deepEqual(JSON.parse(res.body), stored);
 });
 
-test("collection PUT: 204 with no body on update", async () => {
+test("collection PUT: 200 with the stored description on update", async () => {
   onSend = (command) => {
     if (command instanceof HeadObjectCommand) return {};
-    assert.ok(command instanceof PutObjectCommand);
     return {};
   };
   const res = await collectionPut(event("collection-put"));
-  assert.equal(res.statusCode, 204);
-  assert.equal(res.body, "");
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers["Content-Type"], "application/json");
+  assert.ok(JSON.parse(res.body).id);
+});
+
+test("collection PUT: a description without a type gets Collection stamped", async () => {
+  let stored;
+  onSend = (command) => {
+    if (command instanceof HeadObjectCommand) throw s3Error("NotFound");
+    stored = JSON.parse(command.input.Body);
+    return {};
+  };
+  const res = await collectionPut(
+    event("collection-put", { body: JSON.stringify({ id: "diplomas", name: "Diplomas" }) })
+  );
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(stored.type, ["Collection"]);
+  assert.equal(stored.name, "Diplomas");
 });
 
 test("collection PUT: 400 when the body is not JSON", async () => {
