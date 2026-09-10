@@ -1,14 +1,14 @@
 {
-  "resource": "/space/{space_id}/{collection_id}/{resource_id}",
-  "path": "/space/dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c/credentials/credential-1.json",
-  "httpMethod": "DELETE",
+  "version": "2.0",
+  "routeKey": "DELETE /space/{space_id}/{collection_id}/{resource_id}",
+  "rawPath": "/space/dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c/credentials/credential-1.json",
+  "rawQueryString": "",
   "headers": {
     "host": "localhost:3000",
     "accept": "application/json",
-    "X-Forwarded-Proto": "http"
+    "x-forwarded-proto": "http"
   },
   "queryStringParameters": null,
-  "multiValueQueryStringParameters": null,
   "pathParameters": {
     "space_id": "dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c",
     "collection_id": "credentials",
@@ -19,17 +19,22 @@
     "accountId": "123456789012",
     "apiId": "abcdef1234",
     "domainName": "abcdef1234.execute-api.us-east-1.amazonaws.com",
-    "httpMethod": "DELETE",
-    "path": "/Prod/space/dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c/credentials/credential-1.json",
-    "protocol": "HTTP/1.1",
+    "http": {
+      "method": "DELETE",
+      "path": "/space/dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c/credentials/credential-1.json",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1",
+      "userAgent": "was-test-events"
+    },
     "requestId": "c6af9ac6-7b61-11e6-9a41-93e8deadbeef",
-    "resourceId": "abcdef",
-    "resourcePath": "/space/{space_id}/{collection_id}/{resource_id}",
-    "stage": "Prod",
+    "routeKey": "$default",
+    "stage": "$default",
     "authorizer": {
-      "controller": "did:key:z6MkuoW15WTT6ty3coLfS294WKdndim1fteTWK76dMGVUUxk",
-      "capability": "urn:zcap:root:http%3A%2F%2Flocalhost%3A3000%2Fspace%2Fdcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c%2Fcredentials%2Fcredential-1.json",
-      "capabilityAction": "DELETE"
+      "lambda": {
+        "controller": "did:key:z6MkuoW15WTT6ty3coLfS294WKdndim1fteTWK76dMGVUUxk",
+        "capability": "urn:zcap:root:http%3A%2F%2Flocalhost%3A3000%2Fspace%2Fdcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c%2Fcredentials%2Fcredential-1.json",
+        "capabilityAction": "DELETE"
+      }
     }
   },
   "body": null,

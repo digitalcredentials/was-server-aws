@@ -1,27 +1,11 @@
 import { verifyZcap } from "./zcap.mjs";
 
-// API Gateway REQUEST authorizer for zcap-signed invocations.
+// HTTP API Lambda authorizer (payload v2, simple responses) for zcap-signed
+// invocations. verifyZcap reads rawPath / requestContext.http.method /
+// headers, which the v2 REQUEST event carries.
 //
-// A REQUEST authorizer event carries `headers`, `path` and `httpMethod` under
-// the same names a proxy-integration event does, which is what verifyZcap
-// reads, so the event goes straight through.
-
-function policy(principalId, effect, resource, context) {
-  return {
-    principalId,
-    policyDocument: {
-      Version: "2012-10-17",
-      Statement: [
-        {
-          Action: "execute-api:Invoke",
-          Effect: effect,
-          Resource: resource,
-        },
-      ],
-    },
-    context,
-  };
-}
+// A denial is { isAuthorized: false } (API Gateway answers 403); handlers
+// read the context off event.requestContext.authorizer.lambda.
 
 export const lambdaHandler = async (event, context) => {
   let result;
@@ -29,19 +13,19 @@ export const lambdaHandler = async (event, context) => {
     result = await verifyZcap(event);
   } catch (err) {
     console.error("zcap verification failed:", err);
-    // API Gateway maps an error with this exact message to a 401. Anything
-    // else surfaces as a 500, so don't rethrow the underlying error.
-    throw new Error("Unauthorized");
+    return { isAuthorized: false };
   }
 
   const controller = String(result?.controller ?? "");
 
-  // Authorizer context values have to be scalars - no nested objects or arrays.
-  // Handlers read these off event.requestContext.authorizer.
-  return policy(controller || "zcap-invoker", "Allow", event.methodArn, {
-    controller,
-    // A root zcap comes back as its urn string; a delegated one as an object.
-    capability: String(result?.capability?.id ?? result?.capability ?? ""),
-    capabilityAction: String(result?.capabilityAction ?? ""),
-  });
+  // Context values have to be scalars - no nested objects or arrays.
+  return {
+    isAuthorized: true,
+    context: {
+      controller,
+      // A root zcap comes back as its urn string; a delegated one as an object.
+      capability: String(result?.capability?.id ?? result?.capability ?? ""),
+      capabilityAction: String(result?.capabilityAction ?? ""),
+    },
+  };
 };

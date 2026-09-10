@@ -83,7 +83,13 @@ async function getVerifier({ keyId }) {
   }
 
   export const verifyZcap = async (event) => {
-    const { httpMethod, path, headers = {} } = event
+    const { headers = {} } = event
+
+    // HTTP API authorizer payload v2: the method lives under
+    // requestContext.http and the path is rawPath. The $default stage serves
+    // at the root, so rawPath is exactly the path the client signed.
+    const httpMethod = event.requestContext?.http?.method ?? event.httpMethod
+    const path = event.rawPath ?? event.requestContext?.path ?? event.path
 
     const host = getHeader(headers, 'Host')
     const proto = getHeader(headers, 'X-Forwarded-Proto') ?? 'https'
