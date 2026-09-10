@@ -413,3 +413,58 @@ test("resource DELETE: refuses to remove the collection description", async () =
   );
   assert.equal(res.statusCode, 404);
 });
+
+// Deployed, an HTTP API routes a trailing-slash list URL to the resource
+// route with an empty resource_id (sam local collapses the slash instead, so
+// the collection handler's own listing branch covers local runs).
+test("resource GET with empty resource_id: lists the collection's members", async () => {
+  const prefix = `collections/${COLLECTION_ID}/`;
+  onSend = (command) => {
+    assert.ok(command instanceof ListObjectsV2Command);
+    assert.equal(command.input.Prefix, prefix);
+    return {
+      Contents: [
+        { Key: prefix },
+        { Key: `${prefix}description.json` },
+        { Key: `${prefix}${RESOURCE_ID}` },
+      ],
+    };
+  };
+  const route = routes["resource-get"];
+  const res = await resourceGet(
+    event("resource-get", {
+      pathParameters: { ...route.pathParameters, resource_id: "" },
+    })
+  );
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.totalItems, 1);
+  assert.equal(body.items[0].id, RESOURCE_ID);
+});
+
+test("resource GET with empty resource_id under 'collections': lists the space's collections", async () => {
+  onSend = (command) => {
+    assert.ok(command instanceof ListObjectsV2Command);
+    assert.equal(command.input.Prefix, "collections/");
+    return {
+      CommonPrefixes: [
+        { Prefix: "collections/credentials/" },
+        { Prefix: "collections/Trash/" },
+      ],
+    };
+  };
+  const route = routes["resource-get"];
+  const res = await resourceGet(
+    event("resource-get", {
+      pathParameters: {
+        space_id: route.pathParameters.space_id,
+        collection_id: "collections",
+        resource_id: "",
+      },
+    })
+  );
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.totalItems, 2);
+  assert.deepEqual(body.items.map((i) => i.id), ["credentials", "Trash"]);
+});
