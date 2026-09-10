@@ -2,11 +2,14 @@
 
 An implementation of part of the [W3C CCG Wallet Attached Storage
 specification](https://w3c-ccg.github.io/wallet-attached-storage-spec/), built as
-AWS Lambda functions behind an API Gateway REST API, with objects stored in S3.
+AWS Lambda functions behind an API Gateway HTTP API, with objects stored in S3.
 
 Requests are authorized with signed zCap (Authorization Capability) invocations,
-verified by a single API Gateway Lambda REQUEST authorizer rather than by each
-handler.
+verified by a single Lambda REQUEST authorizer rather than by each handler. An
+HTTP API (rather than a REST API) because its CORS is a real gateway feature
+injected into every response — on a REST API only the OPTIONS preflight can be
+configured centrally — and because its `$default` stage serves at the root, so
+URLs carry no `/Prod` prefix.
 
 ## Endpoints
 
@@ -15,6 +18,18 @@ handler.
 | GET | `/space/{space_id}` | `SpaceDescriptionGetFn` | [src/spaces/description/get](src/spaces/description/get/app.mjs) |
 | GET | `/space/{space_id}/collections` | `SpaceCollectionsListGetFn` | [src/spaces/get](src/spaces/get/app.mjs) |
 | GET | `/space/{space_id}/{collection_id}` | `CollectionsGetFn` | [src/collections/get](src/collections/get/app.mjs) |
+| PUT | `/space/{space_id}/{collection_id}` | `CollectionsPutFn` | [src/collections/put](src/collections/put/app.mjs) |
+| GET | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesGetFn` | [src/resources/get](src/resources/get/app.mjs) |
+| PUT | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesPutFn` | [src/resources/put](src/resources/put/app.mjs) |
+| DELETE | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesDeleteFn` | [src/resources/delete](src/resources/delete/app.mjs) |
+
+**Trailing slashes.** WAS list URLs end in a slash (`/space/{s}/collections/`
+lists a Space's Collections; `/space/{s}/{c}/` lists a Collection's members).
+A deployed HTTP API cannot route a trailing slash to its own route key — the
+empty last segment matches the resource route with an empty `resource_id` — so
+`ResourcesGetFn` dispatches an empty `resource_id` to the appropriate listing.
+(`sam local` collapses the trailing slash instead, where `CollectionsGetFn`'s
+own listing branch handles it.)
 
 ### `GET /space/{space_id}`
 
@@ -57,6 +72,19 @@ Behaviour depends on the trailing slash:
 - **Without** — returns the Collection's own
   `collections/{collection_id}/description.json` verbatim.
 
+### `PUT /space/{space_id}/{collection_id}` and `PUT .../{resource_id}`
+
+Upsert a Collection description or a member resource. Both return **201** with
+a `Location` header on create and **200** on update, always with a JSON body —
+API Gateway defaults the `Content-Type` to `application/json`, so an empty
+body breaks clients that trust the header.
+
+### `DELETE /space/{space_id}/{collection_id}/{resource_id}`
+
+A soft delete: the object is copied into the Space's `Trash` collection and the
+original removed. Deleting a resource already in `Trash` removes it
+permanently. Responds 200 with a JSON body pointing at the trashed location.
+
 ## Storage layout
 
 **One S3 bucket per Space, named for the `space_id`.** The bucket *is* the Space,
@@ -68,6 +96,7 @@ s3://{space_id}/
 ├── metadata/
 │   └── description.json          <- the Space description
 └── collections/
+    ├── Trash/                    <- soft-deleted resources (created on first delete)
     └── {collection_id}/
         ├── description.json      <- the Collection description
         ├── {resource_id}         <- a member resource
@@ -80,60 +109,64 @@ Every route on `WASApi` is protected by `WASZcapAuthorizer`, a Lambda **REQUEST*
 authorizer declared as the API's `DefaultAuthorizer`. Handlers do no verification
 of their own.
 
-- [src/authorizer/app.mjs](src/authorizer/app.mjs) — the authorizer entry point;
-  builds the IAM policy.
+- [src/authorizer/app.mjs](src/authorizer/app.mjs) — the authorizer entry
+  point; returns an HTTP API *simple response* (`{ isAuthorized, context }`,
+  payload format 2.0).
 - [src/authorizer/zcap.mjs](src/authorizer/zcap.mjs) — `verifyZcap`, which wraps
   `verifyCapabilityInvocation` from `@interop/http-signature-zcap-verify`.
 
-`verifyZcap(event)` takes the Lambda event as its only argument and derives
-everything it needs from it:
+The **space's controller DID comes from the accounts table** (the `wallet-test`
+DynamoDB table owned by the lcw-back-end stack): `verifyZcap` takes everything
+in the request URL up to and including the `{space_id}` segment — which also
+matches the invoked zcap target — and looks it up against the registered
+`spaceURL` by exact match. That account's `did` controls the root capability,
+so only invocations signed by the registered key verify, and an unregistered
+space is rejected outright.
+
+`verifyZcap(event)` derives everything else from the payload-v2 event:
 
 | `verifyCapabilityInvocation` argument | Derived from |
 | --- | --- |
-| `url`, `expectedTarget` | `X-Forwarded-Proto` + `Host` + `event.path` |
-| `method`, `expectedAction` | `event.httpMethod` |
-| `expectedHost` | `Host` header |
+| `url`, `expectedTarget` | `x-forwarded-proto` + `host` header + `event.rawPath` |
+| `method`, `expectedAction` | `event.requestContext.http.method` |
+| `expectedHost` | `host` header |
 | `expectedRootCapability` | `urn:zcap:root:` + URI-encoded target |
 | `headers` | `event.headers`, with `authorization` normalized to lowercase |
 
-A REQUEST authorizer event carries `headers`, `path` and `httpMethod` under the
-same names a proxy-integration event does, so the event passes straight through.
-Header lookups are case-insensitive, because API Gateway preserves whatever
-casing the client sent.
+Header lookups are case-insensitive; the `$default` stage serves at the root,
+so `rawPath` is exactly the path the client signed.
 
-On success the authorizer returns an `Allow` policy scoped to `event.methodArn`,
-plus the invoker on the authorizer context. Handlers can read it from
-`event.requestContext.authorizer`:
+On success the authorizer answers `{ isAuthorized: true, context: {...} }`.
+HTTP APIs nest that context under `lambda`, so handlers read:
 
 ```js
-const { controller, capability, capabilityAction } = event.requestContext.authorizer;
+const { controller, capability, capabilityAction } =
+  event.requestContext.authorizer.lambda;
 ```
 
 Context values must be scalars — no nested objects or arrays — so the capability
 is passed as its id string.
 
-On failure the authorizer throws an error whose message is exactly
-`Unauthorized`, which is what API Gateway maps to a **401**. Rethrowing the
-underlying verification error would surface as a 500 instead, so the real reason
-is logged rather than thrown.
+On failure the authorizer answers `{ isAuthorized: false }`, which API Gateway
+maps to a **403** (a missing `Authorization` header never reaches the
+authorizer: the gateway answers 401 itself, because the header is the declared
+identity source). The real verification error is logged, never returned.
 
-Two settings in `template.yaml` are deliberate and should not be changed without
-thought:
+Deliberate settings in `template.yaml`:
 
 - **`ReauthorizeEvery: 0`** disables the authorizer result cache. Each zCap is
   signed over its own request, so a cached decision would authorize a *different*
   request than the one that was actually verified.
-- **`AddDefaultAuthorizerToCorsPreflight: false`**. SAM defaults this to `true`,
-  which puts the authorizer in front of `OPTIONS`. Preflight carries no
-  `Authorization` header, so the browser would get a 401 and never reach the real
-  request.
+- **`CorsConfiguration`** on the API handles the OPTIONS preflight and injects
+  the CORS headers into every response — including authorizer denials — with
+  nothing per handler. Preflights are never sent to the authorizer.
 
 ## Project layout
 
 ```
 src/
 ├── authorizer/            zCap REQUEST authorizer (deps bundled, no layer)
-│   ├── app.mjs            policy construction
+│   ├── app.mjs            simple-response construction
 │   ├── zcap.mjs           verifyZcap / verifyCapabilityInvocation
 │   └── package.json       @interop/* dependencies
 ├── spaces/
@@ -144,7 +177,9 @@ src/
 │   └── put/               PUT /space/{space_id}/{collection_id}
 ├── resources/
 │   ├── get/               GET /space/{space_id}/{collection_id}/{resource_id}
-│   └── put/               PUT /space/{space_id}/{collection_id}/{resource_id}
+│   │                      (also serves trailing-slash listings; see Endpoints)
+│   ├── put/               PUT /space/{space_id}/{collection_id}/{resource_id}
+│   └── delete/            DELETE /space/{space_id}/{collection_id}/{resource_id}
 └── sharedLayer/           dead code; commented out of template.yaml
 events/
 ├── routes.mjs             shared route table + event scaffolding
@@ -240,8 +275,9 @@ node sign.mjs space-description-get --invalid | sam local invoke WASZcapAuthoriz
 
 Routes: `space-description-get`, `space-collections-list-get`,
 `collection-list-get`, `collection-description-get`, `collection-put`,
-`resource-put`, `resource-get`. `--invalid` corrupts the signature to exercise
-the 401 path. Diagnostics go to stderr, so the pipe stays clean.
+`resource-put`, `resource-get`, `resource-delete`. `--invalid` corrupts the
+signature to exercise the denial path. Diagnostics go to stderr, so the pipe
+stays clean.
 
 Signing on demand avoids the trap that static signed fixtures fall into: the
 signer sets `expires` to `created + 600` and the signature covers the
@@ -268,6 +304,7 @@ a body additionally get a signed `digest` header over the JSON payload.
 | `collection-put.json` | `PUT /space/{space_id}/{collection_id}` |
 | `resource-put.json` | `PUT /space/{space_id}/{collection_id}/{resource_id}` |
 | `resource-get.json` | `GET /space/{space_id}/{collection_id}/{resource_id}` |
+| `resource-delete.json` | `DELETE /space/{space_id}/{collection_id}/{resource_id}` |
 
 These are what a route handler sees, for invoking one directly:
 
@@ -295,19 +332,22 @@ provides the `@aws-sdk/client-s3` the handler tests resolve).
 [events/check.mjs](events/check.mjs) signs a fresh invocation for each route and
 runs it through the real authorizer in process — no files, no Docker, no AWS
 (the accounts-table lookup is stubbed to register the test key as the space's
-controller). It asserts that each route returns `Allow` scoped to the right
-`methodArn`, that a tampered signature throws exactly `Unauthorized` (the
-message API Gateway maps to a 401), and that the controller embedded in the
+controller). It asserts that each route answers `{ isAuthorized: true }` with
+the controller and capability on the context, that a tampered signature answers
+`{ isAuthorized: false }` (a denial, which API Gateway maps to a 403 — never a
+thrown error, which would be a 500), and that the controller embedded in the
 static proxy fixtures still matches the key the signer derives, so a seed change
 cannot leave them quietly stale.
 
 [events/handlers.test.mjs](events/handlers.test.mjs) then runs every route
 handler in process on `node --test`, feeding it the same proxy events the
 fixtures are generated from and stubbing `S3Client.prototype.send` per test. It
-covers the happy paths (listings, descriptions, resource reads) and the write
-semantics: 201-with-`Location` vs 204 on PUT, `ETag` passthrough, base64 body
-decoding, the 400s for malformed collection descriptions, the reserved
-`description.json` key, and the `NoSuchBucket`/`NoSuchKey` 404s.
+covers the happy paths (listings — including the trailing-slash dispatch
+through the resource handler — descriptions, resource reads) and the write
+semantics: 201-with-`Location` vs 200 on PUT, the soft delete into `Trash` and
+the permanent delete from it, `ETag` passthrough, base64 body decoding, the
+400s for malformed collection descriptions, the reserved `description.json`
+key, and the `NoSuchBucket`/`NoSuchKey` 404s.
 
 The signing key is a throwaway for a seed that is already public in this repo.
 Never point it at a real deployment.
@@ -318,8 +358,8 @@ Never point it at a real deployment.
 sam logs -n WASZcapAuthorizerFn --stack-name "YOUR_STACK_NAME" --tail
 ```
 
-When a request 401s, the authorizer's log group has the real verification error;
-the response body deliberately does not.
+When a request is denied (403), the authorizer's log group has the real
+verification error; the response body deliberately does not.
 
 ## Cleanup
 
@@ -329,18 +369,12 @@ sam delete
 
 ## Known gaps
 
-- **The dev signing seed is hardcoded.** `zcap.mjs` derives `spaceController` —
-  the DID every root capability is issued to, and therefore the root authority
-  for all Spaces — from a literal `testSeed`. This must move to Secrets Manager
-  or SSM before the API is exposed.
 - **`expectedHost` no longer constrains anything.** It is derived from the
-  request's own `Host` header, so the comparison is self-satisfying and a spoofed
-  `Host` passes. Restoring the guard needs a server-controlled source: an
-  environment variable, or `event.requestContext.domainName`.
-- **`src/resources/put` is not deployed.** The handler exists and writes to
-  `collections/{collection_id}/{resource_id}`, but `template.yaml` declares no
-  function or route for it. There is a leftover `ResourcesApi` output that
-  advertises a path nothing serves.
+  request's own `Host` header, so the comparison is self-satisfying — though a
+  spoofed `Host` also changes the space URL the accounts-table lookup matches
+  against, so it no longer widens access on its own. Restoring the guard needs
+  a server-controlled source: an environment variable, or
+  `event.requestContext.domainName`.
 - **`src/sharedLayer` is dead code.** `verifyZcap` moved into the authorizer and
   nothing imports the layer any more, so `DCCSharedLayer` is commented out in
   `template.yaml` along with every `Layers:` and `External:` reference to it. The
@@ -364,4 +398,4 @@ sam delete
 
 - [WAS specification](https://w3c-ccg.github.io/wallet-attached-storage-spec/)
 - [AWS SAM developer guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html)
-- [API Gateway Lambda authorizers](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-use-lambda-authorizer.html)
+- [HTTP API Lambda authorizers](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-lambda-authorizer.html)
