@@ -39,9 +39,10 @@ Resources:
             EnableSimpleResponses: true
             EnableFunctionDefaultPermissions: true
             FunctionArn: !GetAtt WASZcapAuthorizerFn.Arn
+            # No Identity.Headers: an identity source would make API Gateway
+            # answer unsigned requests itself with a 401, and unsigned GETs
+            # must reach the authorizer for the public-read policy check.
             Identity:
-              Headers:
-                - Authorization
               # Every zcap invocation is signed over its own request, so a
               # cached authorization decision would be meaningless. 0 disables
               # the authorizer result cache.
@@ -75,6 +76,9 @@ Resources:
       Policies:
         - DynamoDBReadPolicy:
             TableName: wallet-test
+        # Public-read checks read policy documents from the space buckets
+        - S3ReadPolicy:
+            BucketName: '*'
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -222,6 +226,73 @@ Resources:
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}
+            Method: delete
+
+  # Access-control policies at all three scopes; the authorizer enforces
+  # PublicCanRead for unsigned reads.
+  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#access-control
+  PoliciesFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/policies
+      Handler: app.lambdaHandler
+      Policies:
+        - S3CrudPolicy:
+            BucketName: '*'
+      Events:
+        SpacePolicyGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/policy
+            Method: get
+        SpacePolicyPut:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/policy
+            Method: put
+        SpacePolicyDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/policy
+            Method: delete
+        CollectionPolicyGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/policy
+            Method: get
+        CollectionPolicyPut:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/policy
+            Method: put
+        CollectionPolicyDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/policy
+            Method: delete
+        ResourcePolicyGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/policy
+            Method: get
+        ResourcePolicyPut:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/policy
+            Method: put
+        ResourcePolicyDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/policy
             Method: delete
 
 Outputs:

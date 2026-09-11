@@ -81,6 +81,46 @@ export const routes = {
       resource_id: RESOURCE_ID,
     },
   },
+  // Access-control policies, one route per scope (PUT shown; the check loop
+  // signs whatever method the route declares).
+  "space-policy-put": {
+    resource: "/space/{space_id}/policy",
+    path: `/space/${SPACE_ID}/policy`,
+    method: "PUT",
+    pathParameters: { space_id: SPACE_ID },
+    contentType: "application/json",
+    body: JSON.stringify({ type: "PublicCanRead" }),
+  },
+  "collection-policy-put": {
+    resource: "/space/{space_id}/{collection_id}/policy",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}/policy`,
+    method: "PUT",
+    pathParameters: { space_id: SPACE_ID, collection_id: COLLECTION_ID },
+    contentType: "application/json",
+    body: JSON.stringify({ type: "PublicCanRead" }),
+  },
+  "resource-policy-put": {
+    resource: "/space/{space_id}/{collection_id}/{resource_id}/policy",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}/${RESOURCE_ID}/policy`,
+    method: "PUT",
+    pathParameters: {
+      space_id: SPACE_ID,
+      collection_id: COLLECTION_ID,
+      resource_id: RESOURCE_ID,
+    },
+    contentType: "application/json",
+    body: JSON.stringify({ type: "PublicCanRead" }),
+  },
+  "resource-policy-delete": {
+    resource: "/space/{space_id}/{collection_id}/{resource_id}/policy",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}/${RESOURCE_ID}/policy`,
+    method: "DELETE",
+    pathParameters: {
+      space_id: SPACE_ID,
+      collection_id: COLLECTION_ID,
+      resource_id: RESOURCE_ID,
+    },
+  },
   // Soft-delete a resource: moves it into the space's Trash collection.
   "resource-delete": {
     resource: "/space/{space_id}/{collection_id}/{resource_id}",

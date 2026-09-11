@@ -68,5 +68,57 @@ report(
   proxy.requestContext.authorizer.lambda.controller
 );
 
+// Public reads: an unsigned GET is allowed only when a PublicCanRead policy
+// covers the target (resource, else collection, else space scope). The
+// authorizer's S3 client is stubbed with an in-memory policy store.
+import { authorizerEvent, routeOrDie } from "./routes.mjs";
+
+const { S3Client } = authorizerRequire("@aws-sdk/client-s3");
+let policyStore = {};
+S3Client.prototype.send = async (command) => {
+  const stored = policyStore[command.input.Key];
+  if (stored === undefined) {
+    const err = new Error("NoSuchKey");
+    err.name = "NoSuchKey";
+    throw err;
+  }
+  return { Body: { transformToString: async () => JSON.stringify(stored) } };
+};
+
+function unsignedEvent(name, method) {
+  const route = routeOrDie(name);
+  const event = authorizerEvent(route, { host: "localhost:3000", "x-forwarded-proto": "http" });
+  if (method) {
+    event.requestContext.http.method = method;
+  }
+  return event;
+}
+
+async function checkPublic(name, event, expectAllowed) {
+  const res = await lambdaHandler(event, {});
+  const ok = res.isAuthorized === expectAllowed &&
+    (!expectAllowed || res.context.controller === "public");
+  report(name, ok, `isAuthorized=${res.isAuthorized}`);
+}
+
+const resourceGetRoute = "resource-get";
+const resourceKey = "policies/credentials/credential-1.json.json";
+
+policyStore = {};
+await checkPublic("unsigned GET denied without a policy", unsignedEvent(resourceGetRoute), false);
+
+policyStore = { [resourceKey]: { type: "PublicCanRead" } };
+await checkPublic("unsigned GET allowed by a resource policy", unsignedEvent(resourceGetRoute), true);
+
+policyStore = { "policies/credentials.json": { type: "PublicCanRead" } };
+await checkPublic("unsigned GET allowed by the collection policy", unsignedEvent(resourceGetRoute), true);
+
+policyStore = { "policies/space.json": { type: "PublicCanRead" } };
+await checkPublic("unsigned GET allowed by the space policy", unsignedEvent(resourceGetRoute), true);
+
+policyStore = { [resourceKey]: { type: "PublicCanRead" }, "policies/space.json": { type: "PublicCanRead" } };
+await checkPublic("unsigned write denied even when public", unsignedEvent("resource-put"), false);
+await checkPublic("unsigned policy read denied even when public", unsignedEvent("resource-policy-put", "GET"), false);
+
 console.log(failures ? `\n${failures} check(s) failed` : "\nall checks passed");
 process.exit(failures ? 1 : 0);
