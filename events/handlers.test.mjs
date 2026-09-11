@@ -37,6 +37,7 @@ import { lambdaHandler as collectionPut } from "../src/collections/put/app.mjs";
 import { lambdaHandler as resourcePut } from "../src/resources/put/app.mjs";
 import { lambdaHandler as resourceGet } from "../src/resources/get/app.mjs";
 import { lambdaHandler as resourceDelete } from "../src/resources/delete/app.mjs";
+import { lambdaHandler as policyHandler, policyKey } from "../src/policies/app.mjs";
 
 const AUTH = {
   controller: "did:key:z6MkuoW15WTT6ty3coLfS294WKdndim1fteTWK76dMGVUUxk",
@@ -482,4 +483,55 @@ test("resource GET with empty resource_id under 'collections': lists the space's
   const body = JSON.parse(res.body);
   assert.equal(body.totalItems, 2);
   assert.deepEqual(body.items.map((i) => i.id), ["credentials", "Trash"]);
+});
+
+
+test("policy keys map each scope to its own object", () => {
+  assert.equal(policyKey({}), "policies/space.json");
+  assert.equal(policyKey({ collection_id: "c" }), "policies/c.json");
+  assert.equal(policyKey({ collection_id: "c", resource_id: "r" }), "policies/c/r.json");
+});
+
+test("policy PUT: stores the policy and echoes it back", async () => {
+  let put;
+  onSend = (command) => {
+    assert.ok(command instanceof PutObjectCommand);
+    put = command.input;
+    return {};
+  };
+  const res = await policyHandler(event("resource-policy-put"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(put.Key, `policies/${COLLECTION_ID}/${RESOURCE_ID}.json`);
+  assert.deepEqual(JSON.parse(res.body), { type: "PublicCanRead" });
+});
+
+test("policy PUT: rejects a policy without a type", async () => {
+  const res = await policyHandler(
+    event("resource-policy-put", { body: JSON.stringify({ nope: true }) })
+  );
+  assert.equal(res.statusCode, 400);
+});
+
+test("policy GET: 404 when no policy is set", async () => {
+  onSend = () => {
+    throw s3Error("NoSuchKey");
+  };
+  const route = routes["resource-policy-put"];
+  const res = await policyHandler(
+    event("resource-policy-put", {
+      requestContext: { http: { method: "GET", path: route.path } },
+      body: null,
+    })
+  );
+  assert.equal(res.statusCode, 404);
+});
+
+test("policy DELETE: idempotent 200", async () => {
+  onSend = (command) => {
+    assert.ok(command instanceof DeleteObjectCommand);
+    return {};
+  };
+  const res = await policyHandler(event("resource-policy-delete"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).deleted, true);
 });
