@@ -22,6 +22,7 @@ URLs carry no `/Prod` prefix.
 | GET | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesGetFn` | [src/resources/get](src/resources/get/app.mjs) |
 | PUT | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesPutFn` | [src/resources/put](src/resources/put/app.mjs) |
 | DELETE | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesDeleteFn` | [src/resources/delete](src/resources/delete/app.mjs) |
+| GET/PUT/DELETE | `/space/{space_id}/policy`, `.../{collection_id}/policy`, `.../{resource_id}/policy` | `PoliciesFn` | [src/policies](src/policies/app.mjs) |
 
 **Trailing slashes.** WAS list URLs end in a slash (`/space/{s}/collections/`
 lists a Space's Collections; `/space/{s}/{c}/` lists a Collection's members).
@@ -85,6 +86,18 @@ A soft delete: the object is copied into the Space's `Trash` collection and the
 original removed. Deleting a resource already in `Trash` removes it
 permanently. Responds 200 with a JSON body pointing at the trashed location.
 
+### `{GET,PUT,DELETE} .../policy` — access-control policies
+
+Policy sub-resources exist at all three scopes: the Space, a Collection, and a
+resource. A policy document is stored under the bucket's `policies/` prefix
+(mirroring the path it governs), so policies never appear in listings. PUT
+upserts the document, GET returns it, DELETE reverts the scope to
+capability-only access. The one policy the system acts on is `PublicCanRead`
+(what `@interop/was-client`'s `setPublic()` writes): it lets **unsigned GETs**
+read the covered scope — see Authorization below. The LCW front end uses a
+resource-scoped policy for its public share links, so a shared credential's
+collection and siblings stay private.
+
 ## Storage layout
 
 **One S3 bucket per Space, named for the `space_id`.** The bucket *is* the Space,
@@ -95,6 +108,9 @@ segment.
 s3://{space_id}/
 ├── metadata/
 │   └── description.json          <- the Space description
+├── policies/                     <- access-control policies, keyed by governed path
+│   └── {collection_id}/
+│       └── {resource_id}.json    <- e.g. a resource-scoped PublicCanRead policy
 └── collections/
     ├── Trash/                    <- soft-deleted resources (created on first delete)
     └── {collection_id}/
@@ -108,6 +124,16 @@ s3://{space_id}/
 Every route on `WASApi` is protected by `WASZcapAuthorizer`, a Lambda **REQUEST**
 authorizer declared as the API's `DefaultAuthorizer`. Handlers do no verification
 of their own.
+
+The authorizer runs for **unsigned requests too** (it declares no
+`Authorization` identity source, which would make API Gateway answer 401
+before the authorizer could look). A request without authorization headers is
+allowed only as a **public read**: a GET of a space, collection, or resource
+covered by a `PublicCanRead` policy, cascading outward — the resource's own
+policy, else its collection's, else the space's
+([src/authorizer/publicRead.mjs](src/authorizer/publicRead.mjs)). Such
+requests get `context.controller = "public"`. Policy sub-resources themselves
+are never public, and unsigned writes are always denied.
 
 - [src/authorizer/app.mjs](src/authorizer/app.mjs) — the authorizer entry
   point; returns an HTTP API *simple response* (`{ isAuthorized, context }`,
