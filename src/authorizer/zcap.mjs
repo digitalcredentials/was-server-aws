@@ -8,7 +8,7 @@ import {
 import * as didKey from '@interop/did-method-key'
 import { Ed25519VerificationKey } from '@interop/ed25519-verification-key'
 import { Ed25519Signature2020 } from '@interop/ed25519-signature'
-import { DynamoDBClient, ScanCommand } from '@aws-sdk/client-dynamodb'
+import { DynamoDBClient, GetItemCommand, ScanCommand } from '@aws-sdk/client-dynamodb'
 
 const didKeyDriver = didKey.driver()
 didKeyDriver.use({
@@ -20,6 +20,7 @@ const baseDocumentLoader = securityLoader()
 
 const dynamoClient = new DynamoDBClient()
 const TABLE_NAME = process.env.TABLE_NAME ?? 'wallet-test'
+const SPACES_TABLE_NAME = process.env.SPACES_TABLE_NAME ?? 'wallet-spaces'
 
 // The space URL is everything in the request URL up to and including the
 // {space_id} segment, matching the spaceURL registered for the account.
@@ -28,16 +29,34 @@ function getSpaceUrl(url) {
   return match?.[1]
 }
 
-// Looks up the DID registered for the space in the accounts table. The table
-// is keyed by email, so filter on an exact match of the stored space URL.
+// Looks up the DID registered for the space. The spaces registry
+// (wallet-spaces, owned by the lcw-back-end stack) is keyed by the space URL,
+// so the common case is a single keyed read. Accounts created before the
+// registry existed only have a spaceURL attribute on their accounts-table row,
+// so fall back to the legacy scan of the accounts table (keyed by email).
 async function getSpaceControllerDid(spaceUrl) {
-  const { Items: items = [] } = await dynamoClient.send(new ScanCommand({
-    TableName: TABLE_NAME,
-    FilterExpression: 'spaceURL = :spaceUrl',
-    ExpressionAttributeValues: { ':spaceUrl': { S: spaceUrl } }
-  }))
+  let did
+  try {
+    const { Item: item } = await dynamoClient.send(new GetItemCommand({
+      TableName: SPACES_TABLE_NAME,
+      Key: { spaceURL: { S: spaceUrl } }
+    }))
+    did = item?.did?.S
+  } catch (err) {
+    // A missing registry table must not take down authorization for
+    // registry-less deployments; the legacy scan below still answers.
+    console.error('Spaces registry lookup failed:', err)
+  }
+  if (!did) {
+    const { Items: items = [] } = await dynamoClient.send(new ScanCommand({
+      TableName: TABLE_NAME,
+      FilterExpression: 'spaceURL = :spaceUrl',
+      ExpressionAttributeValues: { ':spaceUrl': { S: spaceUrl } }
+    }))
+    did = items[0]?.did?.S
+  }
   // Registered DIDs may carry a key fragment (did:key:z6Mk...#z6Mk...)
-  return items[0]?.did?.S?.split('#')[0]
+  return did?.split('#')[0]
 }
 
 function rootCapabilityLoader(spaceController) {
