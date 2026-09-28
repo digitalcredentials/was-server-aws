@@ -141,13 +141,13 @@ are never public, and unsigned writes are always denied.
 - [src/authorizer/zcap.mjs](src/authorizer/zcap.mjs) — `verifyZcap`, which wraps
   `verifyCapabilityInvocation` from `@interop/http-signature-zcap-verify`.
 
-The **space's controller DID comes from the accounts table** (the `wallet-test`
-DynamoDB table owned by the lcw-back-end stack): `verifyZcap` takes everything
-in the request URL up to and including the `{space_id}` segment — which also
-matches the invoked zcap target — and looks it up against the registered
-`spaceURL` by exact match. That account's `did` controls the root capability,
-so only invocations signed by the registered key verify, and an unregistered
-space is rejected outright.
+The **space's controller DID comes from the spaces registry** (the
+`wallet-spaces` DynamoDB table owned by the lcw-back-end stack, keyed by space
+URL with one row per space): `verifyZcap` takes everything in the request URL
+up to and including the `{space_id}` segment — which also matches the invoked
+zcap target — and reads that row with a keyed GetItem. The row's `did` controls
+the root capability, so only invocations signed by the registered key verify,
+and a space with no registry row is rejected outright.
 
 `verifyZcap(event)` derives everything else from the payload-v2 event:
 

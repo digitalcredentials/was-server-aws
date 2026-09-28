@@ -70,17 +70,11 @@ Resources:
       Timeout: 10
       Environment:
         Variables:
-          # Accounts table (owned by the lcw-back-end stack): maps each
-          # account's email to its registered did and spaceURL. Only the
-          # legacy fallback path reads it now.
-          TABLE_NAME: wallet-test
           # Spaces registry (owned by the lcw-back-end stack): one row per
           # WAS space, keyed by spaceURL, carrying the controller did and the
           # space's type ('credential' | 'batch').
           SPACES_TABLE_NAME: wallet-spaces
       Policies:
-        - DynamoDBReadPolicy:
-            TableName: wallet-test
         - DynamoDBReadPolicy:
             TableName: wallet-spaces
         # Public-read checks read policy documents from the space buckets
