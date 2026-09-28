@@ -12,17 +12,29 @@ import { controller, signedAuthorizerEvent } from "./sign.mjs";
 import { routes } from "./routes.mjs";
 
 // The authorizer resolves the space's controller DID from DynamoDB
-// (getSpaceControllerDid in src/authorizer/zcap.mjs). Stub the client it uses
-// - resolved from the authorizer's own node_modules - to register the test
-// signing key as every space's controller, complete with the key fragment the
-// real table rows carry, so the fragment-stripping stays exercised.
+// (getSpaceControllerDid in src/authorizer/zcap.mjs): a keyed GetItem on the
+// wallet-spaces registry first, then a legacy Scan of the accounts table.
+// Stub the client it uses - resolved from the authorizer's own node_modules -
+// to register the test signing key as every space's controller, complete with
+// the key fragment the real table rows carry, so the fragment-stripping stays
+// exercised. `registryMisses` starves the GetItem path so the legacy fallback
+// can be exercised explicitly.
 const authorizerRequire = createRequire(
   new URL("../src/authorizer/app.mjs", import.meta.url)
 );
-const { DynamoDBClient } = authorizerRequire("@aws-sdk/client-dynamodb");
-DynamoDBClient.prototype.send = async () => ({
-  Items: [{ did: { S: `${controller}#${controller.slice("did:key:".length)}` } }],
-});
+const { DynamoDBClient, GetItemCommand } = authorizerRequire("@aws-sdk/client-dynamodb");
+const didWithFragment = `${controller}#${controller.slice("did:key:".length)}`;
+let registryMisses = false;
+let registryReads = 0;
+let legacyScans = 0;
+DynamoDBClient.prototype.send = async (command) => {
+  if (command instanceof GetItemCommand) {
+    registryReads++;
+    return registryMisses ? {} : { Item: { did: { S: didWithFragment } } };
+  }
+  legacyScans++;
+  return { Items: [{ did: { S: didWithFragment } }] };
+};
 
 let failures = 0;
 
@@ -45,6 +57,28 @@ for (const name of Object.keys(routes)) {
     report(name, false, `threw "${err.message}"`);
   }
 }
+
+report(
+  "registry GetItem served every route, no legacy scans",
+  registryReads > 0 && legacyScans === 0,
+  `getItems=${registryReads} scans=${legacyScans}`
+);
+
+// An unmigrated space has no registry row: the authorizer must fall back to
+// the legacy accounts-table scan and still allow.
+registryMisses = true;
+try {
+  const event = await signedAuthorizerEvent("space-description-get");
+  const res = await lambdaHandler(event, {});
+  report(
+    "legacy fallback allows when the registry misses",
+    res.isAuthorized === true && legacyScans === 1,
+    `isAuthorized=${res.isAuthorized} scans=${legacyScans}`
+  );
+} catch (err) {
+  report("legacy fallback allows when the registry misses", false, `threw "${err.message}"`);
+}
+registryMisses = false;
 
 // A tampered signature must produce a denial ({ isAuthorized: false }), which
 // API Gateway answers with a 403 - never an allow, and never a thrown error
