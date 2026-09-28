@@ -1,7 +1,7 @@
 version = 0.1
 
 [default.deploy.parameters]
-stack_name = "dcc"
+stack_name = "was-server"
 resolve_s3 = true
 s3_prefix = "dcc"
 region = "us-east-1"
