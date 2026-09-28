@@ -11,14 +11,13 @@ import { lambdaHandler } from "../src/authorizer/app.mjs";
 import { controller, signedAuthorizerEvent } from "./sign.mjs";
 import { routes } from "./routes.mjs";
 
-// The authorizer resolves the space's controller DID from DynamoDB
-// (getSpaceControllerDid in src/authorizer/zcap.mjs): a keyed GetItem on the
-// wallet-spaces registry first, then a legacy Scan of the accounts table.
-// Stub the client it uses - resolved from the authorizer's own node_modules -
-// to register the test signing key as every space's controller, complete with
-// the key fragment the real table rows carry, so the fragment-stripping stays
-// exercised. `registryMisses` starves the GetItem path so the legacy fallback
-// can be exercised explicitly.
+// The authorizer resolves the space's controller DID with a keyed GetItem on
+// the wallet-spaces registry (getSpaceControllerDid in src/authorizer/
+// zcap.mjs). Stub the client it uses - resolved from the authorizer's own
+// node_modules - to register the test signing key as every space's
+// controller, complete with the key fragment the real table rows carry, so
+// the fragment-stripping stays exercised. `registryMisses` empties the
+// registry so the unregistered-space denial can be exercised explicitly.
 const authorizerRequire = createRequire(
   new URL("../src/authorizer/app.mjs", import.meta.url)
 );
@@ -26,14 +25,12 @@ const { DynamoDBClient, GetItemCommand } = authorizerRequire("@aws-sdk/client-dy
 const didWithFragment = `${controller}#${controller.slice("did:key:".length)}`;
 let registryMisses = false;
 let registryReads = 0;
-let legacyScans = 0;
 DynamoDBClient.prototype.send = async (command) => {
-  if (command instanceof GetItemCommand) {
-    registryReads++;
-    return registryMisses ? {} : { Item: { did: { S: didWithFragment } } };
+  if (!(command instanceof GetItemCommand)) {
+    throw new Error(`unexpected DynamoDB call: ${command.constructor.name}`);
   }
-  legacyScans++;
-  return { Items: [{ did: { S: didWithFragment } }] };
+  registryReads++;
+  return registryMisses ? {} : { Item: { did: { S: didWithFragment } } };
 };
 
 let failures = 0;
@@ -59,24 +56,24 @@ for (const name of Object.keys(routes)) {
 }
 
 report(
-  "registry GetItem served every route, no legacy scans",
-  registryReads > 0 && legacyScans === 0,
-  `getItems=${registryReads} scans=${legacyScans}`
+  "registry GetItem served every route",
+  registryReads > 0,
+  `getItems=${registryReads}`
 );
 
-// An unmigrated space has no registry row: the authorizer must fall back to
-// the legacy accounts-table scan and still allow.
+// A space with no registry row is not a space anyone controls: even a
+// well-signed invocation must be denied.
 registryMisses = true;
 try {
   const event = await signedAuthorizerEvent("space-description-get");
   const res = await lambdaHandler(event, {});
   report(
-    "legacy fallback allows when the registry misses",
-    res.isAuthorized === true && legacyScans === 1,
-    `isAuthorized=${res.isAuthorized} scans=${legacyScans}`
+    "unregistered space denied",
+    res.isAuthorized === false,
+    `isAuthorized=${res.isAuthorized}`
   );
 } catch (err) {
-  report("legacy fallback allows when the registry misses", false, `threw "${err.message}"`);
+  report("unregistered space denied", false, `threw "${err.message}" instead of denying`);
 }
 registryMisses = false;
 
