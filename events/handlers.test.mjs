@@ -31,6 +31,7 @@ import {
 } from "./routes.mjs";
 
 import { lambdaHandler as spaceDescriptionGet } from "../src/spaces/description/get/app.mjs";
+import { lambdaHandler as spaceDescriptionPut } from "../src/spaces/description/put/app.mjs";
 import { lambdaHandler as spaceCollectionsListGet } from "../src/spaces/get/app.mjs";
 import { lambdaHandler as collectionGet } from "../src/collections/get/app.mjs";
 import { lambdaHandler as collectionPut } from "../src/collections/put/app.mjs";
@@ -534,4 +535,48 @@ test("policy DELETE: idempotent 200", async () => {
   const res = await policyHandler(event("resource-policy-delete"));
   assert.equal(res.statusCode, 200);
   assert.equal(JSON.parse(res.body).deleted, true);
+});
+
+// PUT /space/{space_id} - space description update
+
+test("space description PUT: stores the stamped description", async () => {
+  let stored;
+  onSend = (command) => {
+    assert.ok(command instanceof PutObjectCommand);
+    assert.equal(command.input.Bucket, SPACE_ID);
+    assert.equal(command.input.Key, "metadata/description.json");
+    assert.equal(command.input.ContentType, "application/json");
+    stored = JSON.parse(command.input.Body);
+    return {};
+  };
+  const res = await spaceDescriptionPut(event("space-description-put"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(stored.name, "My Space");
+  assert.equal(stored.description, "Everything I have collected.");
+  // The server owns the derived fields
+  assert.equal(stored.id, SPACE_ID);
+  assert.equal(stored.url, `/space/${SPACE_ID}`);
+  assert.deepEqual(stored.type, ["Space"]);
+  assert.equal(stored.linkset, `/space/${SPACE_ID}/linkset`);
+  assert.deepEqual(JSON.parse(res.body), stored);
+});
+
+test("space description PUT: 400 when the body is not JSON", async () => {
+  const res = await spaceDescriptionPut(event("space-description-put", { body: "not json" }));
+  assert.equal(res.statusCode, 400);
+});
+
+test('space description PUT: 400 when type does not include "Space"', async () => {
+  const res = await spaceDescriptionPut(
+    event("space-description-put", { body: JSON.stringify({ type: ["Collection"] }) })
+  );
+  assert.equal(res.statusCode, 400);
+});
+
+test("space description PUT: 404 when the space bucket does not exist", async () => {
+  onSend = () => {
+    throw s3Error("NoSuchBucket");
+  };
+  const res = await spaceDescriptionPut(event("space-description-put"));
+  assert.equal(res.statusCode, 404);
 });

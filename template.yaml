@@ -150,6 +150,23 @@ Resources:
             Path: /space/{space_id}
             Method: get
 
+  # Update the space's description document.
+  SpaceDescriptionPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/spaces/description/put
+      Handler: app.lambdaHandler
+      Policies:
+        - S3WritePolicy:
+            BucketName: '*'
+      Events:
+        PutSpaceDescription:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}
+            Method: put
+
   # Update-or-create a collection description by id.
   # https://w3c-ccg.github.io/wallet-attached-storage-spec/#update-or-create-by-id-collection-operation
   CollectionsPutFn:
