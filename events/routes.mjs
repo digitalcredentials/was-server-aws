@@ -41,6 +41,18 @@ export const routes = {
     method: "GET",
     pathParameters: { space_id: SPACE_ID, collection_id: COLLECTION_ID },
   },
+  // Update the space's description document.
+  "space-description-put": {
+    resource: "/space/{space_id}",
+    path: `/space/${SPACE_ID}`,
+    method: "PUT",
+    pathParameters: { space_id: SPACE_ID },
+    contentType: "application/json",
+    body: JSON.stringify({
+      name: "My Space",
+      description: "Everything I have collected.",
+    }),
+  },
   // Update-or-create the collection's description document.
   "collection-put": {
     resource: "/space/{space_id}/{collection_id}",
