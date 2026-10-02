@@ -1,0 +1,22 @@
+{
+  "name": "was-spaces-registry",
+  "version": "1.0.0",
+  "description": "POST /spaces (coupon-gated provisioning) and GET /spaces",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0"
+  },
+  "dependencies": {
+    "@interop/ed25519-signature": "^7.2.1",
+    "@interop/ed25519-verification-key": "^8.1.0",
+    "@interop/http-client": "^1.0.5",
+    "@interop/http-signature-zcap-verify": "^12.2.2",
+    "@interop/security-document-loader": "^10.1.1",
+    "@interop/zcap": "^11.1.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1127.0",
+    "@aws-sdk/client-s3": "^3.1127.0"
+  }
+}

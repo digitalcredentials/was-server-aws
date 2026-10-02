@@ -21,6 +21,13 @@ export const routes = {
     method: "GET",
     pathParameters: { space_id: SPACE_ID },
   },
+  // Deletes a batch space (bucket + registry row).
+  "space-delete": {
+    resource: "/space/{space_id}",
+    path: `/space/${SPACE_ID}`,
+    method: "DELETE",
+    pathParameters: { space_id: SPACE_ID },
+  },
   "space-collections-list-get": {
     resource: "/space/{space_id}/collections",
     path: `/space/${SPACE_ID}/collections`,

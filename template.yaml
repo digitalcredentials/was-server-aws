@@ -2,6 +2,18 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Wallet Attached Storage API
 
+Parameters:
+  # The wallet account table (owned by the lcw-back-end stack): email -> did
+  # plus the registration token that serves as the space-creation coupon.
+  AccountTableName:
+    Type: String
+    Default: wallet-test
+  # Base URL that provisioned space URLs are built from; a space lands at
+  # {SpaceBaseUrl}/{bucket name}.
+  SpaceBaseUrl:
+    Type: String
+    Default: https://was.lcw-sandbox.org/space
+
 Globals:
   Function:
     Timeout: 3
@@ -50,6 +62,7 @@ Resources:
       CorsConfiguration:
         AllowMethods:
           - GET
+          - POST
           - PUT
           - DELETE
           - OPTIONS
@@ -95,6 +108,107 @@ Resources:
           - app.mjs
         Banner:
           - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
+  # The space registry endpoints (POST /spaces, GET /spaces) of the WAS spec.
+  # These routes have no space in their URL, so the standard authorizer cannot
+  # resolve a controller for them; they verify the zcap invocation in-handler
+  # instead (POST against the controller DID in the body, per the spec; GET
+  # against the DID registered for the account). Space creation additionally
+  # requires a coupon matching the token stored for the account at
+  # registration.
+  SpacesRegistryFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/spaces/registry
+      Handler: app.lambdaHandler
+      # zcap verification resolves did:key documents; same budget as the
+      # authorizer.
+      Timeout: 10
+      Environment:
+        Variables:
+          ACCOUNTS_TABLE_NAME: !Ref AccountTableName
+          SPACES_TABLE_NAME: wallet-spaces
+          SPACE_URL_BASE: !Ref SpaceBaseUrl
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AccountTableName
+        - DynamoDBCrudPolicy:
+            TableName: wallet-spaces
+        # Space buckets all share the dcc-was- prefix, so bucket provisioning
+        # is scoped to it.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:CreateBucket
+                - s3:PutObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*
+                - arn:aws:s3:::dcc-was-*/*
+      Events:
+        CreateSpace:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /spaces
+            Method: post
+            Auth:
+              Authorizer: NONE
+        ListSpaces:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /spaces
+            Method: get
+            Auth:
+              Authorizer: NONE
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2022"
+        Format: "esm"
+        Platform: "node"
+        External:
+          - "@aws-sdk/*"
+        OutExtension:
+          - .js=.mjs
+        EntryPoints:
+          - app.mjs
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
+  # DELETE /space/{space_id}: deletes a batch space (bucket + registry row).
+  # Runs behind the standard authorizer, which verifies the invocation against
+  # the space's registered controller DID — the spec's deletion rule.
+  SpaceDeleteFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/spaces/delete
+      Handler: app.lambdaHandler
+      # Emptying a bucket can outlast the 3s default.
+      Timeout: 30
+      Environment:
+        Variables:
+          SPACES_TABLE_NAME: wallet-spaces
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: wallet-spaces
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:DeleteObject
+                - s3:DeleteBucket
+              Resource:
+                - arn:aws:s3:::dcc-was-*
+                - arn:aws:s3:::dcc-was-*/*
+      Events:
+        DeleteSpace:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}
+            Method: delete
 
   CollectionsGetFn:
     Type: AWS::Serverless::Function

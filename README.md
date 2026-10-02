@@ -15,6 +15,9 @@ URLs carry no `/Prod` prefix.
 
 | Method | Path | Function | Source |
 | --- | --- | --- | --- |
+| POST | `/spaces` | `SpacesRegistryFn` | [src/spaces/registry](src/spaces/registry/app.mjs) |
+| GET | `/spaces` | `SpacesRegistryFn` | [src/spaces/registry](src/spaces/registry/app.mjs) |
+| DELETE | `/space/{space_id}` | `SpaceDeleteFn` | [src/spaces/delete](src/spaces/delete/app.mjs) |
 | GET | `/space/{space_id}` | `SpaceDescriptionGetFn` | [src/spaces/description/get](src/spaces/description/get/app.mjs) |
 | GET | `/space/{space_id}/collections` | `SpaceCollectionsListGetFn` | [src/spaces/get](src/spaces/get/app.mjs) |
 | GET | `/space/{space_id}/{collection_id}` | `CollectionsGetFn` | [src/collections/get](src/collections/get/app.mjs) |
@@ -31,6 +34,44 @@ empty last segment matches the resource route with an empty `resource_id` — so
 `ResourcesGetFn` dispatches an empty `resource_id` to the appropriate listing.
 (`sam local` collapses the trailing slash instead, where `CollectionsGetFn`'s
 own listing branch handles it.)
+
+### `POST /spaces` and `GET /spaces`
+
+Implements the spec's space provisioning and listing
+([http-api-post-spaces](https://w3c-ccg.github.io/wallet-attached-storage-spec/)).
+These routes have no space in their URL, so the standard authorizer cannot
+resolve a controller for them; the handler verifies the zcap invocation
+itself.
+
+**POST /spaces** provisions a space. The body is
+`{controller, email, type, name?, coupon}`:
+
+- `controller` — the new space's controller DID. Per the spec, the request
+  must be authorized by this DID: the invocation signature is verified against
+  it.
+- `coupon` — space creation is restricted: the coupon must match the token the
+  account holder provided at registration, stored on the account row in the
+  account table (the `AccountTableName` stack parameter). A missing account,
+  missing token, or wrong coupon is a 403.
+- `type` — `credential` or `batch`, recorded in the wallet-spaces registry.
+- `name` — seeds the space's description document.
+
+On success (201) the handler creates the space's bucket (`dcc-was-<uuid>`),
+seeds `metadata/description.json`, registers the space in the wallet-spaces
+registry, and returns `{space, type, name}`.
+
+**GET /spaces?email=...** lists the account's registered spaces as
+`{spaces: [{url, type, createdAt}]}`. The invocation must be signed by the DID
+registered for the account; the email is in the query string, which the signed
+URL covers.
+
+### `DELETE /space/{space_id}`
+
+Deletes a whole space: the bucket is emptied and removed, then the registry
+row. The standard authorizer verifies the invocation against the space's
+registered controller DID — the spec's rule that deletion requires a
+capability invoked by the controller. Only `batch` spaces may be deleted
+(403 otherwise).
 
 ### `GET /space/{space_id}`
 
@@ -196,7 +237,10 @@ src/
 │   ├── zcap.mjs           verifyZcap / verifyCapabilityInvocation
 │   └── package.json       @interop/* dependencies
 ├── spaces/
+│   ├── registry/          POST /spaces + GET /spaces (deps bundled, in-handler zcap verify)
+│   ├── delete/            DELETE /space/{space_id}
 │   ├── description/get/   GET /space/{space_id}
+│   ├── description/put/   PUT /space/{space_id}
 │   └── get/               GET /space/{space_id}/collections
 ├── collections/
 │   ├── get/               GET /space/{space_id}/{collection_id}

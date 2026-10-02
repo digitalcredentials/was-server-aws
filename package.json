@@ -8,6 +8,7 @@
     "test": "npm --prefix events test"
   },
   "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1145.0",
     "@aws-sdk/client-s3": "^3.600.0"
   }
 }
