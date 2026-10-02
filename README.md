@@ -69,10 +69,11 @@ On success (201) the handler creates the space's bucket (`dcc-was-<uuid>`),
 seeds `metadata/description.json`, registers the space in the wallet-spaces
 registry, and returns `{space, type, name}`.
 
-**GET /spaces?email=...** lists the account's registered spaces as
-`{spaces: [{url, type, createdAt}]}`. The invocation must be signed by the DID
-registered for the account; the email is in the query string, which the signed
-URL covers.
+**GET /spaces** lists the caller's registered spaces as
+`{spaces: [{url, type, createdAt}]}` — per the spec, the spaces the caller is
+authorized to access. The caller self-authenticates: the signer's DID is taken
+from the invocation's `keyId`, the invocation must verify against it, and the
+response is the spaces registered to that DID (the registry's `by-did` index).
 
 ### `DELETE /space/{space_id}`
 

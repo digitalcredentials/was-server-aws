@@ -2,15 +2,16 @@
 // (https://w3c-ccg.github.io/wallet-attached-storage-spec/):
 //
 //   POST /spaces          provision a space  {controller, email, type, name?, coupon}
-//   GET  /spaces?email=.. list the account's spaces
+//   GET  /spaces          list the caller's spaces
 //
 // Per the spec, a POST must carry the new space's `controller` DID in the
 // body and be authorized by that DID: the request is a zcap invocation of its
 // own URL signed by the controller's key (see verify.mjs). Creation is
 // further restricted by a coupon, redeemed from the was-coupons table (with
 // optional usesRemaining and expiresAt); the controller must also be the DID
-// registered for the account. A GET must be signed by the DID registered for
-// the account.
+// registered for the account. A GET self-authenticates: the invocation must
+// verify against the DID that signed it, and the response lists the spaces
+// registered to that DID.
 //
 // DELETE is spec-shaped too, but lives at /space/{space_id} (src/spaces/
 // delete), where the standard authorizer verifies the space's controller.
@@ -135,14 +136,25 @@ async function createSpace({ email, controller, type, name }) {
   return { space: spaceURL, type, name: spaceName };
 }
 
-async function listSpaces({ email }) {
+async function listSpaces({ did }) {
   const { Items: items = [] } = await dynamoClient.send(new QueryCommand({
     TableName: SPACES_TABLE,
-    IndexName: "by-email",
-    KeyConditionExpression: "email = :email",
-    ExpressionAttributeValues: { ":email": { S: email } }
+    IndexName: "by-did",
+    KeyConditionExpression: "did = :did",
+    ExpressionAttributeValues: { ":did": { S: did } }
   }));
   return { spaces: items.map(spaceFromItem) };
+}
+
+// The DID whose key signed the invocation, from the http-signature header's
+// keyId (a did:key URL like did:key:z6Mk...#z6Mk...). Verification against
+// this DID still has to pass before it is trusted.
+function signerDid(event) {
+  const authorization = Object.entries(event.headers ?? {}).find(
+    ([name]) => name.toLowerCase() === "authorization"
+  )?.[1];
+  const keyId = authorization?.match(/keyId="([^"]+)"/)?.[1];
+  return keyId?.startsWith("did:key:") ? keyId.split("#")[0] : undefined;
 }
 
 export const lambdaHandler = async (event) => {
@@ -208,30 +220,19 @@ export const lambdaHandler = async (event) => {
   }
 
   if (method === "GET") {
-    const email = event.queryStringParameters?.email;
-    if (!email) {
-      return json(400, { error: "Missing email." });
-    }
-
-    // Listing is authorized by the DID registered for the account; the email
-    // is in the query string, which the signed URL covers.
-    let account;
-    try {
-      account = await getAccount(email);
-    } catch (error) {
-      console.error("Error looking up account:", error);
-      return json(500, { error: "Server error." });
-    }
-    // Stored DIDs may carry a key fragment (did:key:z6Mk...#z6Mk...)
-    const registeredDid = account?.did?.S?.split("#")[0];
-    if (!registeredDid || !(await verifyInvocation({ event, did: registeredDid }))) {
+    // Per the spec, listing returns the spaces the caller is authorized to
+    // access: the caller self-authenticates (the invocation must verify
+    // against the DID that signed it) and gets the spaces registered to that
+    // DID. No account lookup, no email parameter.
+    const did = signerDid(event);
+    if (!did || !(await verifyInvocation({ event, did }))) {
       return json(401, { error: "Unauthorized." });
     }
 
     try {
-      return json(200, await listSpaces({ email }));
+      return json(200, await listSpaces({ did }));
     } catch (error) {
-      console.error(`Space listing failed for ${email}:`, error);
+      console.error(`Space listing failed for ${did}:`, error);
       return json(500, { error: "Server error." });
     }
   }
