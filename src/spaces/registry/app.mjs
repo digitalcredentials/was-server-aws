@@ -7,9 +7,10 @@
 // Per the spec, a POST must carry the new space's `controller` DID in the
 // body and be authorized by that DID: the request is a zcap invocation of its
 // own URL signed by the controller's key (see verify.mjs). Creation is
-// further restricted by a coupon: the request's `coupon` must match the token
-// stored for the account at registration. A GET must be signed by the DID
-// registered for the account.
+// further restricted by a coupon, redeemed from the was-coupons table (with
+// optional usesRemaining and expiresAt); the controller must also be the DID
+// registered for the account. A GET must be signed by the DID registered for
+// the account.
 //
 // DELETE is spec-shaped too, but lives at /space/{space_id} (src/spaces/
 // delete), where the standard authorizer verifies the space's controller.
@@ -22,7 +23,8 @@ import {
   DynamoDBClient,
   GetItemCommand,
   PutItemCommand,
-  QueryCommand
+  QueryCommand,
+  UpdateItemCommand
 } from "@aws-sdk/client-dynamodb";
 import { S3Client, CreateBucketCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { verifyInvocation } from "./verify.mjs";
@@ -32,6 +34,7 @@ const s3 = new S3Client();
 
 const ACCOUNTS_TABLE = process.env.ACCOUNTS_TABLE_NAME ?? "wallet-test";
 const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "wallet-spaces";
+const COUPONS_TABLE = process.env.COUPONS_TABLE_NAME ?? "was-coupons";
 const SPACE_URL_BASE = (process.env.SPACE_URL_BASE ?? "https://was.example.org/space").replace(/\/+$/, "");
 
 const SPACE_TYPES = new Set(["credential", "batch"]);
@@ -58,6 +61,46 @@ async function getAccount(email) {
     Key: { email: { S: email } }
   }));
   return account;
+}
+
+// Redeems a coupon from the coupons table: the row must exist, must not be
+// expired (expiresAt, absent = never), and must have uses left (usesRemaining,
+// absent = unlimited). A finite coupon is decremented with a conditional
+// update, so concurrent redemptions cannot overspend it. Returns true when
+// the coupon was redeemed.
+async function redeemCoupon(coupon) {
+  if (!coupon || typeof coupon !== "string") {
+    return false;
+  }
+  const { Item: row } = await dynamoClient.send(new GetItemCommand({
+    TableName: COUPONS_TABLE,
+    Key: { coupon: { S: coupon } }
+  }));
+  if (!row) {
+    return false;
+  }
+  const expiresAt = row.expiresAt?.S;
+  if (expiresAt && expiresAt <= new Date().toISOString()) {
+    return false;
+  }
+  if (row.usesRemaining === undefined) {
+    return true;
+  }
+  try {
+    await dynamoClient.send(new UpdateItemCommand({
+      TableName: COUPONS_TABLE,
+      Key: { coupon: { S: coupon } },
+      UpdateExpression: "SET usesRemaining = usesRemaining - :one",
+      ConditionExpression: "usesRemaining > :zero",
+      ExpressionAttributeValues: { ":one": { N: "1" }, ":zero": { N: "0" } }
+    }));
+    return true;
+  } catch (error) {
+    if (error.name === "ConditionalCheckFailedException") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function createSpace({ email, controller, type, name }) {
@@ -132,8 +175,8 @@ export const lambdaHandler = async (event) => {
       return json(401, { error: "Unauthorized." });
     }
 
-    // Space creation requires a coupon: the token stored for the account at
-    // registration time.
+    // The controller must be the DID registered for the account, so a leaked
+    // coupon alone cannot register spaces under someone else's email.
     let account;
     try {
       account = await getAccount(email);
@@ -141,9 +184,19 @@ export const lambdaHandler = async (event) => {
       console.error("Error looking up account:", error);
       return json(500, { error: "Server error." });
     }
-    const token = account?.token?.S;
-    if (!token || !coupon || coupon !== token) {
-      return json(403, { error: "A valid coupon is required to create a space." });
+    const registeredDid = account?.did?.S?.split("#")[0];
+    if (!registeredDid || registeredDid !== controller.split("#")[0]) {
+      return json(401, { error: "Unauthorized." });
+    }
+
+    // Space creation requires redeeming a coupon from the coupons table.
+    try {
+      if (!(await redeemCoupon(coupon))) {
+        return json(403, { error: "A valid coupon is required to create a space." });
+      }
+    } catch (error) {
+      console.error("Error redeeming coupon:", error);
+      return json(500, { error: "Server error." });
     }
 
     try {
