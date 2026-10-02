@@ -111,6 +111,17 @@ test("space description GET: merges stored description with derived fields", asy
   assert.equal(body.linkset, `/space/${SPACE_ID}/linkset`);
 });
 
+test("space description GET: unwraps a double-encoded stored document", async () => {
+  // The registration state machine once double-encoded the seed (a JSON
+  // string containing the JSON object); the handler unwraps it.
+  onSend = () => s3Object(JSON.stringify(JSON.stringify({ name: "Main Space" })));
+  const res = await spaceDescriptionGet(event("space-description-get"));
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.name, "Main Space");
+  assert.equal(body.id, SPACE_ID);
+});
+
 test("space description GET: 404 when the space bucket does not exist", async () => {
   onSend = () => {
     throw s3Error("NoSuchBucket");
