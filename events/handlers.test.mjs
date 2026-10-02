@@ -20,7 +20,14 @@ import {
   ListObjectsV2Command,
   CopyObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
+  DeleteBucketCommand,
 } from "@aws-sdk/client-s3";
+import {
+  DynamoDBClient,
+  GetItemCommand,
+  DeleteItemCommand,
+} from "@aws-sdk/client-dynamodb";
 
 import {
   proxyEvent,
@@ -38,6 +45,7 @@ import { lambdaHandler as collectionPut } from "../src/collections/put/app.mjs";
 import { lambdaHandler as resourcePut } from "../src/resources/put/app.mjs";
 import { lambdaHandler as resourceGet } from "../src/resources/get/app.mjs";
 import { lambdaHandler as resourceDelete } from "../src/resources/delete/app.mjs";
+import { lambdaHandler as spaceDelete } from "../src/spaces/delete/app.mjs";
 import { lambdaHandler as policyHandler, policyKey } from "../src/policies/app.mjs";
 
 const AUTH = {
@@ -54,6 +62,16 @@ beforeEach(() => {
   };
 });
 S3Client.prototype.send = async (command) => onSend(command);
+
+// The space DELETE handler also reads the wallet-spaces registry; stubbed the
+// same way.
+let onDynamoSend;
+beforeEach(() => {
+  onDynamoSend = (command) => {
+    throw new Error(`unexpected DynamoDB call: ${command.constructor.name}`);
+  };
+});
+DynamoDBClient.prototype.send = async (command) => onDynamoSend(command);
 
 function s3Error(name) {
   const err = new Error(name);
@@ -579,4 +597,74 @@ test("space description PUT: 404 when the space bucket does not exist", async ()
   };
   const res = await spaceDescriptionPut(event("space-description-put"));
   assert.equal(res.statusCode, 404);
+});
+
+// DELETE /space/{space_id} - whole-space deletion (batch spaces only)
+
+const SPACE_URL = `http://localhost:3000/space/${SPACE_ID}`;
+
+test("space DELETE: empties the bucket, deletes it, and removes the registry row", async () => {
+  const dynamoCalls = [];
+  onDynamoSend = (command) => {
+    dynamoCalls.push(command);
+    if (command instanceof GetItemCommand) {
+      assert.equal(command.input.Key.spaceURL.S, SPACE_URL);
+      return { Item: { spaceURL: { S: SPACE_URL }, type: { S: "batch" } } };
+    }
+    return {};
+  };
+  const s3Calls = [];
+  onSend = (command) => {
+    s3Calls.push(command);
+    if (command instanceof ListObjectsV2Command) {
+      return { Contents: [{ Key: "batch/batch.json" }], IsTruncated: false };
+    }
+    return {};
+  };
+
+  const res = await spaceDelete(event("space-delete"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).deleted, true);
+
+  assert.equal(dynamoCalls.length, 2);
+  assert.ok(dynamoCalls[0] instanceof GetItemCommand);
+  assert.ok(dynamoCalls[1] instanceof DeleteItemCommand);
+  assert.equal(dynamoCalls[1].input.Key.spaceURL.S, SPACE_URL);
+
+  assert.equal(s3Calls.length, 3);
+  assert.ok(s3Calls[0] instanceof ListObjectsV2Command);
+  assert.ok(s3Calls[1] instanceof DeleteObjectsCommand);
+  assert.deepEqual(s3Calls[1].input.Delete.Objects, [{ Key: "batch/batch.json" }]);
+  assert.ok(s3Calls[2] instanceof DeleteBucketCommand);
+  assert.equal(s3Calls[2].input.Bucket, SPACE_ID);
+});
+
+test("space DELETE: 403 for a credential space", async () => {
+  onDynamoSend = (command) => {
+    assert.ok(command instanceof GetItemCommand);
+    return { Item: { spaceURL: { S: SPACE_URL }, type: { S: "credential" } } };
+  };
+  const res = await spaceDelete(event("space-delete"));
+  assert.equal(res.statusCode, 403);
+});
+
+test("space DELETE: 404 when the space is not registered", async () => {
+  onDynamoSend = (command) => {
+    assert.ok(command instanceof GetItemCommand);
+    return {};
+  };
+  const res = await spaceDelete(event("space-delete"));
+  assert.equal(res.statusCode, 404);
+});
+
+test("space DELETE: tolerates an already-deleted bucket", async () => {
+  onDynamoSend = (command) =>
+    command instanceof GetItemCommand
+      ? { Item: { spaceURL: { S: SPACE_URL }, type: { S: "batch" } } }
+      : {};
+  onSend = () => {
+    throw s3Error("NoSuchBucket");
+  };
+  const res = await spaceDelete(event("space-delete"));
+  assert.equal(res.statusCode, 200);
 });
