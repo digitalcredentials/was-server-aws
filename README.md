@@ -363,12 +363,12 @@ signer sets `expires` to `created + 600` and the signature covers the
 `(expires)` pseudo-header, so a stored signed event stops verifying ten minutes
 after it is written. A fresh one is always inside that window.
 
-The authorizer resolves each space's controller DID from the accounts table
-([src/authorizer/zcap.mjs](src/authorizer/zcap.mjs)), and only an invocation
-signed by that DID verifies. `check.mjs` stubs the lookup so the test signing
-key is always the registered controller; to exercise a real deployment with
-`sign.mjs`, the account for `SPACE_ID` must be registered with the DID the test
-seed derives. A signature also covers `(request-target)` and `host`, so it is
+The authorizer resolves each space's controller DID from the wallet-spaces
+registry ([src/authorizer/zcap.mjs](src/authorizer/zcap.mjs)), and only an
+invocation signed by that DID verifies. `check.mjs` stubs the lookup so the
+test signing key is always the registered controller; to exercise a real
+deployment with `sign.mjs`, the space `SPACE_ID` must be registered with the
+DID the test seed derives. A signature also covers `(request-target)` and `host`, so it is
 bound to one route and one host — it is not reusable across paths. Routes with
 a body additionally get a signed `digest` header over the JSON payload.
 
@@ -410,7 +410,7 @@ provides the `@aws-sdk/client-s3` the handler tests resolve).
 
 [events/check.mjs](events/check.mjs) signs a fresh invocation for each route and
 runs it through the real authorizer in process — no files, no Docker, no AWS
-(the accounts-table lookup is stubbed to register the test key as the space's
+(the registry lookup is stubbed to register the test key as the space's
 controller). It asserts that each route answers `{ isAuthorized: true }` with
 the controller and capability on the context, that a tampered signature answers
 `{ isAuthorized: false }` (a denial, which API Gateway maps to a 403 — never a
@@ -450,7 +450,7 @@ sam delete
 
 - **`expectedHost` no longer constrains anything.** It is derived from the
   request's own `Host` header, so the comparison is self-satisfying — though a
-  spoofed `Host` also changes the space URL the accounts-table lookup matches
+  spoofed `Host` also changes the space URL the registry lookup matches
   against, so it no longer widens access on its own. Restoring the guard needs
   a server-controlled source: an environment variable, or
   `event.requestContext.domainName`.
