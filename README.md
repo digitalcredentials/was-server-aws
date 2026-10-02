@@ -48,11 +48,20 @@ itself.
 
 - `controller` — the new space's controller DID. Per the spec, the request
   must be authorized by this DID: the invocation signature is verified against
-  it.
-- `coupon` — space creation is restricted: the coupon must match the token the
-  account holder provided at registration, stored on the account row in the
-  account table (the `AccountTableName` stack parameter). A missing account,
-  missing token, or wrong coupon is a 403.
+  it. The controller must also be the DID registered for the account (the
+  `AccountTableName` stack parameter), so a leaked coupon alone cannot
+  register spaces under someone else's email.
+- `coupon` — space creation is restricted: the coupon is redeemed from the
+  `was-coupons` table this stack owns. A coupon row may carry `usesRemaining`
+  (a number; absent means unlimited) and `expiresAt` (an ISO timestamp; absent
+  means never) — a finite coupon is decremented atomically on each redemption.
+  An unknown, expired, or spent coupon is a 403. The wallet deployment seeds
+  its registration code as an unlimited coupon; mint further rows directly:
+
+  ```sh
+  aws dynamodb put-item --table-name was-coupons --item \
+    '{"coupon":{"S":"<secret>"},"usesRemaining":{"N":"5"},"expiresAt":{"S":"2027-01-01T00:00:00Z"},"createdAt":{"S":"2026-10-02T00:00:00Z"}}'
+  ```
 - `type` — `credential` or `batch`, recorded in the wallet-spaces registry.
 - `name` — seeds the space's description document.
 

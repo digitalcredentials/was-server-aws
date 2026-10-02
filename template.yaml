@@ -20,6 +20,23 @@ Globals:
     Runtime: nodejs24.x
 
 Resources:
+  # Space-creation coupons, owned by this stack: one row per coupon string.
+  # Optional attributes: usesRemaining (N; absent = unlimited) and expiresAt
+  # (ISO timestamp; absent = never). POST /spaces redeems a coupon from here;
+  # whoever administers the deployment mints rows (the wallet back end seeds
+  # its registration code as an unlimited coupon).
+  WasCouponsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: was-coupons
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: coupon
+          AttributeType: S
+      KeySchema:
+        - AttributeName: coupon
+          KeyType: HASH
+
   # Unused since verifyZcap moved into src/authorizer and its deps were bundled
   # into that function. Nothing imports /opt/nodejs/dcc-shared-layer-utils any
   # more. The source is still in src/sharedLayer/ if this needs to come back.
@@ -114,8 +131,7 @@ Resources:
   # resolve a controller for them; they verify the zcap invocation in-handler
   # instead (POST against the controller DID in the body, per the spec; GET
   # against the DID registered for the account). Space creation additionally
-  # requires a coupon matching the token stored for the account at
-  # registration.
+  # requires redeeming a coupon from the was-coupons table.
   SpacesRegistryFn:
     Type: AWS::Serverless::Function
     Properties:
@@ -128,12 +144,16 @@ Resources:
         Variables:
           ACCOUNTS_TABLE_NAME: !Ref AccountTableName
           SPACES_TABLE_NAME: wallet-spaces
+          COUPONS_TABLE_NAME: !Ref WasCouponsTable
           SPACE_URL_BASE: !Ref SpaceBaseUrl
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref AccountTableName
         - DynamoDBCrudPolicy:
             TableName: wallet-spaces
+        # Redeeming a finite coupon decrements its usesRemaining.
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WasCouponsTable
         # Space buckets all share the dcc-was- prefix, so bucket provisioning
         # is scoped to it.
         - Statement:
