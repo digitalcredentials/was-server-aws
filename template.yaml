@@ -3,11 +3,6 @@ Transform: AWS::Serverless-2016-10-31
 Description: Wallet Attached Storage API
 
 Parameters:
-  # The wallet account table (owned by the lcw-back-end stack): email -> did
-  # plus the registration token that serves as the space-creation coupon.
-  AccountTableName:
-    Type: String
-    Default: wallet-test
   # Base URL that provisioned space URLs are built from; a space lands at
   # {SpaceBaseUrl}/{bucket name}.
   SpaceBaseUrl:
@@ -130,8 +125,9 @@ Resources:
   # These routes have no space in their URL, so the standard authorizer cannot
   # resolve a controller for them; they verify the zcap invocation in-handler
   # instead (POST against the controller DID in the body, per the spec; GET
-  # against the DID registered for the account). Space creation additionally
-  # requires redeeming a coupon from the was-coupons table.
+  # against the DID that signed the invocation). Space creation additionally
+  # requires redeeming a coupon from the was-coupons table. The server knows
+  # nothing about wallet accounts.
   SpacesRegistryFn:
     Type: AWS::Serverless::Function
     Properties:
@@ -142,13 +138,10 @@ Resources:
       Timeout: 10
       Environment:
         Variables:
-          ACCOUNTS_TABLE_NAME: !Ref AccountTableName
           SPACES_TABLE_NAME: wallet-spaces
           COUPONS_TABLE_NAME: !Ref WasCouponsTable
           SPACE_URL_BASE: !Ref SpaceBaseUrl
       Policies:
-        - DynamoDBReadPolicy:
-            TableName: !Ref AccountTableName
         - DynamoDBCrudPolicy:
             TableName: wallet-spaces
         # Redeeming a finite coupon decrements its usesRemaining.

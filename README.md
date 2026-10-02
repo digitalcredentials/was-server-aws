@@ -44,13 +44,12 @@ resolve a controller for them; the handler verifies the zcap invocation
 itself.
 
 **POST /spaces** provisions a space. The body is
-`{controller, email, type, name?, coupon}`:
+`{controller, type, name?, coupon}`:
 
 - `controller` — the new space's controller DID. Per the spec, the request
   must be authorized by this DID: the invocation signature is verified against
-  it. The controller must also be the DID registered for the account (the
-  `AccountTableName` stack parameter), so a leaked coupon alone cannot
-  register spaces under someone else's email.
+  it. The server knows nothing about wallet accounts; registry rows are keyed
+  to the controller DID alone.
 - `coupon` — space creation is restricted: the coupon is redeemed from the
   `was-coupons` table this stack owns. A coupon row may carry `usesRemaining`
   (a number; absent means unlimited) and `expiresAt` (an ISO timestamp; absent
