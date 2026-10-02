@@ -19,7 +19,17 @@ export const lambdaHandler = async (event, context) => {
         Key: `metadata/description.json`,
       });
       const { Body } = await s3.send(command);
-      const stored = JSON.parse(await Body.transformToString());
+      let stored = JSON.parse(await Body.transformToString());
+      // Tolerate a double-encoded document (a JSON string containing the
+      // JSON object): the registration state machine's aws-sdk putObject
+      // integration serialized a pre-stringified Body a second time.
+      if (typeof stored === "string") {
+        try {
+          stored = JSON.parse(stored);
+        } catch {
+          stored = {};
+        }
+      }
 
       // Keep whatever was authored (name, controller, createdBy, ...) but let the
       // server own the fields that are derived from the request path.
