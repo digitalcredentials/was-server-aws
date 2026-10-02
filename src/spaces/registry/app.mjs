@@ -1,17 +1,17 @@
 // The space registry endpoints of the Wallet Attached Storage spec
 // (https://w3c-ccg.github.io/wallet-attached-storage-spec/):
 //
-//   POST /spaces          provision a space  {controller, email, type, name?, coupon}
+//   POST /spaces          provision a space  {controller, type, name?, coupon}
 //   GET  /spaces          list the caller's spaces
 //
 // Per the spec, a POST must carry the new space's `controller` DID in the
 // body and be authorized by that DID: the request is a zcap invocation of its
 // own URL signed by the controller's key (see verify.mjs). Creation is
 // further restricted by a coupon, redeemed from the was-coupons table (with
-// optional usesRemaining and expiresAt); the controller must also be the DID
-// registered for the account. A GET self-authenticates: the invocation must
-// verify against the DID that signed it, and the response lists the spaces
-// registered to that DID.
+// optional usesRemaining and expiresAt). The server knows nothing about
+// wallet accounts: registry rows are keyed to the controller DID alone. A GET
+// self-authenticates: the invocation must verify against the DID that signed
+// it, and the response lists the spaces registered to that DID.
 //
 // DELETE is spec-shaped too, but lives at /space/{space_id} (src/spaces/
 // delete), where the standard authorizer verifies the space's controller.
@@ -33,7 +33,6 @@ import { verifyInvocation } from "./verify.mjs";
 const dynamoClient = new DynamoDBClient();
 const s3 = new S3Client();
 
-const ACCOUNTS_TABLE = process.env.ACCOUNTS_TABLE_NAME ?? "wallet-test";
 const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "wallet-spaces";
 const COUPONS_TABLE = process.env.COUPONS_TABLE_NAME ?? "was-coupons";
 const SPACE_URL_BASE = (process.env.SPACE_URL_BASE ?? "https://was.example.org/space").replace(/\/+$/, "");
@@ -54,14 +53,6 @@ function spaceFromItem(item) {
     type: item.type?.S,
     createdAt: item.CreatedAt?.S
   };
-}
-
-async function getAccount(email) {
-  const { Item: account } = await dynamoClient.send(new GetItemCommand({
-    TableName: ACCOUNTS_TABLE,
-    Key: { email: { S: email } }
-  }));
-  return account;
 }
 
 // Redeems a coupon from the coupons table: the row must exist, must not be
@@ -104,10 +95,10 @@ async function redeemCoupon(coupon) {
   }
 }
 
-async function createSpace({ email, controller, type, name }) {
+async function createSpace({ controller, type, name }) {
   const bucketName = `dcc-was-${randomUUID()}`;
   const spaceURL = `${SPACE_URL_BASE}/${bucketName}`;
-  const spaceName = name || `${email}'s ${type} space`;
+  const spaceName = name || `My ${type} space`;
 
   await s3.send(new CreateBucketCommand({ Bucket: bucketName }));
   // The space description, read back from metadata/description.json (same
@@ -123,11 +114,12 @@ async function createSpace({ email, controller, type, name }) {
       createdBy: controller
     })
   }));
+  // Registry rows are keyed to the controller DID alone; the server knows
+  // nothing about wallet accounts.
   await dynamoClient.send(new PutItemCommand({
     TableName: SPACES_TABLE,
     Item: {
       spaceURL: { S: spaceURL },
-      email: { S: email },
       did: { S: controller },
       type: { S: type },
       CreatedAt: { S: new Date().toISOString() }
@@ -171,12 +163,9 @@ export const lambdaHandler = async (event) => {
       return json(400, { error: "Request body must be valid JSON." });
     }
 
-    const { controller, email, type, name, coupon } = body;
+    const { controller, type, name, coupon } = body;
     if (!controller || typeof controller !== "string" || !controller.startsWith("did:")) {
       return json(400, { error: "controller must be a DID." });
-    }
-    if (!email) {
-      return json(400, { error: "Missing email." });
     }
     if (!SPACE_TYPES.has(type)) {
       return json(400, { error: `type must be one of: ${[...SPACE_TYPES].join(", ")}` });
@@ -184,20 +173,6 @@ export const lambdaHandler = async (event) => {
 
     // The spec requires the request to be authorized by the body's controller.
     if (!(await verifyInvocation({ event, did: controller.split("#")[0] }))) {
-      return json(401, { error: "Unauthorized." });
-    }
-
-    // The controller must be the DID registered for the account, so a leaked
-    // coupon alone cannot register spaces under someone else's email.
-    let account;
-    try {
-      account = await getAccount(email);
-    } catch (error) {
-      console.error("Error looking up account:", error);
-      return json(500, { error: "Server error." });
-    }
-    const registeredDid = account?.did?.S?.split("#")[0];
-    if (!registeredDid || registeredDid !== controller.split("#")[0]) {
       return json(401, { error: "Unauthorized." });
     }
 
@@ -212,9 +187,9 @@ export const lambdaHandler = async (event) => {
     }
 
     try {
-      return json(201, await createSpace({ email, controller: controller.split("#")[0], type, name }));
+      return json(201, await createSpace({ controller: controller.split("#")[0], type, name }));
     } catch (error) {
-      console.error(`Space creation failed for ${email}:`, error);
+      console.error(`Space creation failed for ${controller}:`, error);
       return json(500, { error: "Server error." });
     }
   }
