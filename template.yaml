@@ -223,6 +223,33 @@ Resources:
             Path: /space/{space_id}
             Method: delete
 
+  # POST /space/{space_id}/ — create a collection (server-generated id unless
+  # the body carries one). Registered on both the bare space path and the
+  # {collection_id} route: a deployed HTTP API matches the trailing-slash form
+  # to the latter with an empty final segment, and the handler refuses a POST
+  # to a real collection path.
+  CollectionsCreateFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/collections/create
+      Handler: app.lambdaHandler
+      Policies:
+        - S3CrudPolicy:
+            BucketName: '*'
+      Events:
+        CreateCollection:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}
+            Method: post
+        CreateCollectionSlash:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}
+            Method: post
+
   CollectionsGetFn:
     Type: AWS::Serverless::Function
     Properties:

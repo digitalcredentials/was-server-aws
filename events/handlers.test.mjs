@@ -46,6 +46,7 @@ import { lambdaHandler as resourcePut } from "../src/resources/put/app.mjs";
 import { lambdaHandler as resourceGet } from "../src/resources/get/app.mjs";
 import { lambdaHandler as resourceDelete } from "../src/resources/delete/app.mjs";
 import { lambdaHandler as spaceDelete } from "../src/spaces/delete/app.mjs";
+import { lambdaHandler as collectionCreate } from "../src/collections/create/app.mjs";
 import { lambdaHandler as policyHandler, policyKey } from "../src/policies/app.mjs";
 
 const AUTH = {
@@ -679,3 +680,82 @@ test("space DELETE: tolerates an already-deleted bucket", async () => {
   const res = await spaceDelete(event("space-delete"));
   assert.equal(res.statusCode, 200);
 });
+
+// POST /space/{space_id}/ - create a collection
+
+test("collection create: writes the description and returns its id", async () => {
+  let stored;
+  onSend = (command) => {
+    if (command instanceof HeadObjectCommand) {
+      const err = new Error("NotFound");
+      err.name = "NotFound";
+      throw err;
+    }
+    assert.ok(command instanceof PutObjectCommand);
+    assert.equal(command.input.Bucket, SPACE_ID);
+    assert.equal(command.input.Key, "collections/vault/description.json");
+    stored = JSON.parse(command.input.Body);
+    return {};
+  };
+  const res = await collectionCreate(event("collection-create"));
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.headers.Location, `/space/${SPACE_ID}/vault`);
+  const body = JSON.parse(res.body);
+  assert.equal(body.id, "vault");
+  assert.deepEqual(body.type, ["Collection"]);
+  assert.deepEqual(body.encryption, { scheme: "edv" });
+  assert.equal(stored.name, "Vault");
+});
+
+test("collection create: generates an id when the body names none", async () => {
+  onSend = (command) => {
+    if (command instanceof HeadObjectCommand) {
+      const err = new Error("NotFound");
+      err.name = "NotFound";
+      throw err;
+    }
+    return {};
+  };
+  const res = await collectionCreate(event("collection-create", { body: "{}" }));
+  assert.equal(res.statusCode, 201);
+  assert.match(JSON.parse(res.body).id, /^[0-9a-f-]{36}$/);
+});
+
+test("collection create: 409 when the collection already exists", async () => {
+  onSend = (command) => {
+    assert.ok(command instanceof HeadObjectCommand);
+    return {};
+  };
+  const res = await collectionCreate(event("collection-create"));
+  assert.equal(res.statusCode, 409);
+});
+
+test("collection create: rejects reserved and malformed ids", async () => {
+  assert.equal(
+    (await collectionCreate(event("collection-create", { body: JSON.stringify({ id: "collections" }) }))).statusCode,
+    400
+  );
+  assert.equal(
+    (await collectionCreate(event("collection-create", { body: JSON.stringify({ id: "a/b" }) }))).statusCode,
+    400
+  );
+});
+
+test("collection create: 405 on a real collection path", async () => {
+  const route = routes["collection-create"];
+  const res = await collectionCreate(
+    event("collection-create", {
+      pathParameters: { ...route.pathParameters, collection_id: "vault" },
+    })
+  );
+  assert.equal(res.statusCode, 405);
+});
+
+test("collection create: 404 when the space bucket does not exist", async () => {
+  onSend = () => {
+    throw s3Error("NoSuchBucket");
+  };
+  const res = await collectionCreate(event("collection-create"));
+  assert.equal(res.statusCode, 404);
+});
+
