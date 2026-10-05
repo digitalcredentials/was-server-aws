@@ -8,7 +8,7 @@ const s3 = new S3Client({});
 
 // The collection's own metadata lives alongside its resources, so it must not
 // be writable through the resource endpoint.
-const RESERVED_RESOURCE_IDS = new Set(["description.json"]);
+const RESERVED_RESOURCE_IDS = new Set(["description.json", "meta"]);
 
 export const lambdaHandler = async (event, context) => {
   // The zcap invocation was already verified by the WASZcapAuthorizer; the

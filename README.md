@@ -26,6 +26,7 @@ URLs carry no `/Prod` prefix.
 | GET | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesGetFn` | [src/resources/get](src/resources/get/app.mjs) |
 | PUT | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesPutFn` | [src/resources/put](src/resources/put/app.mjs) |
 | DELETE | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesDeleteFn` | [src/resources/delete](src/resources/delete/app.mjs) |
+| GET/PUT | `/space/{space_id}/{collection_id}/meta`, `.../{resource_id}/meta` | `MetaFn` | [src/meta](src/meta/app.mjs) |
 | GET/PUT/DELETE | `/space/{space_id}/policy`, `.../{collection_id}/policy`, `.../{resource_id}/policy` | `PoliciesFn` | [src/policies](src/policies/app.mjs) |
 
 **Trailing slashes.** WAS list URLs end in a slash (`/space/{s}/collections/`
@@ -149,6 +150,20 @@ body breaks clients that trust the header.
 A soft delete: the object is copied into the Space's `Trash` collection and the
 original removed. Deleting a resource already in `Trash` removes it
 permanently. Responds 200 with a JSON body pointing at the trashed location.
+
+### `{GET,PUT} .../meta` — user-writable metadata
+
+The `/meta` sub-resource at the collection and resource scopes carries the
+user-writable metadata: `custom` (`{name, tags}` in plaintext — or an opaque
+EDV envelope on an encrypted collection, with its `epoch` beside it) plus
+server-managed fields (`createdAt`/`updatedAt`, and a resource's derived
+`contentType` and `size`). PUT is a full replacement of the user-writable
+part. The metadata is versioned independently of the content: the stored
+document's ETag comes back on GET and PUT and is honored as
+`If-Match`/`If-None-Match` (412 on failure) through S3's conditional writes.
+Documents live under the bucket's `meta/` prefix, mirroring the path they
+describe, so they never appear in listings; `meta` is a reserved resource id,
+since the literal route shadows it.
 
 ### `{GET,PUT,DELETE} .../policy` — access-control policies
 

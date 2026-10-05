@@ -21,6 +21,26 @@ export const routes = {
     method: "GET",
     pathParameters: { space_id: SPACE_ID },
   },
+  // The collection's user-writable metadata sub-resource.
+  "collection-meta": {
+    resource: "/space/{space_id}/{collection_id}/meta",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}/meta`,
+    method: "PUT",
+    pathParameters: { space_id: SPACE_ID, collection_id: COLLECTION_ID },
+    contentType: "application/json",
+    body: JSON.stringify({ custom: { name: "My credentials", tags: { kind: "vc" } } }),
+  },
+  // A resource's user-writable metadata sub-resource.
+  "resource-meta": {
+    resource: "/space/{space_id}/{collection_id}/{resource_id}/meta",
+    path: `/space/${SPACE_ID}/${COLLECTION_ID}/${RESOURCE_ID}/meta`,
+    method: "GET",
+    pathParameters: {
+      space_id: SPACE_ID,
+      collection_id: COLLECTION_ID,
+      resource_id: RESOURCE_ID,
+    },
+  },
   // Creates a collection in the space (trailing slash: the space-items path).
   "collection-create": {
     resource: "/space/{space_id}/{collection_id}",
