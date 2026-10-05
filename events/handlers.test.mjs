@@ -47,6 +47,7 @@ import { lambdaHandler as resourceGet } from "../src/resources/get/app.mjs";
 import { lambdaHandler as resourceDelete } from "../src/resources/delete/app.mjs";
 import { lambdaHandler as spaceDelete } from "../src/spaces/delete/app.mjs";
 import { lambdaHandler as collectionCreate } from "../src/collections/create/app.mjs";
+import { lambdaHandler as metaHandler } from "../src/meta/app.mjs";
 import { lambdaHandler as policyHandler, policyKey } from "../src/policies/app.mjs";
 
 const AUTH = {
@@ -780,6 +781,107 @@ test("collection create: 404 when the space bucket does not exist", async () => 
     throw s3Error("NoSuchBucket");
   };
   const res = await collectionCreate(event("collection-create"));
+  assert.equal(res.statusCode, 404);
+});
+
+// GET/PUT /space/{space_id}/{collection_id}[/{resource_id}]/meta
+
+test("collection meta PUT: stores the document and returns its ETag", async () => {
+  let stored;
+  onSend = (command) => {
+    if (command instanceof ListObjectsV2Command) {
+      return { Contents: [{ Key: `collections/${COLLECTION_ID}/x` }] };
+    }
+    if (command instanceof GetObjectCommand) {
+      throw s3Error("NoSuchKey");
+    }
+    assert.ok(command instanceof PutObjectCommand);
+    assert.equal(command.input.Key, `meta/${COLLECTION_ID}.json`);
+    stored = JSON.parse(command.input.Body);
+    return { ETag: '"v1"' };
+  };
+  const res = await metaHandler(event("collection-meta"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers.ETag, '"v1"');
+  assert.deepEqual(stored.custom, { name: "My credentials", tags: { kind: "vc" } });
+  assert.ok(stored.createdAt && stored.updatedAt);
+});
+
+test("collection meta PUT: forwards If-Match and maps a failed precondition to 412", async () => {
+  onSend = (command) => {
+    if (command instanceof ListObjectsV2Command) {
+      return { Contents: [{ Key: `collections/${COLLECTION_ID}/x` }] };
+    }
+    if (command instanceof GetObjectCommand) {
+      return { Body: { transformToString: async () => '{"createdAt":"2026-01-01T00:00:00Z"}' }, ETag: '"v1"' };
+    }
+    assert.equal(command.input.IfMatch, '"stale"');
+    const err = new Error("PreconditionFailed");
+    err.name = "PreconditionFailed";
+    err.$metadata = { httpStatusCode: 412 };
+    throw err;
+  };
+  const route = routes["collection-meta"];
+  const res = await metaHandler({
+    ...event("collection-meta"),
+    headers: { ...proxyEvent(route, AUTH).headers, "if-match": '"stale"' },
+  });
+  assert.equal(res.statusCode, 412);
+});
+
+test("collection meta GET: 404 when the collection does not exist", async () => {
+  onSend = (command) => {
+    assert.ok(command instanceof ListObjectsV2Command);
+    return { Contents: [] };
+  };
+  const res = await metaHandler(
+    event("collection-meta", { requestContext: { ...proxyEvent(routes["collection-meta"], AUTH).requestContext, http: { method: "GET" } } })
+  );
+  assert.equal(res.statusCode, 404);
+});
+
+test("resource meta GET: merges derived contentType/size with the stored document", async () => {
+  onSend = (command) => {
+    if (command instanceof HeadObjectCommand) {
+      assert.equal(command.input.Key, `collections/${COLLECTION_ID}/${RESOURCE_ID}`);
+      return { ContentType: "application/json", ContentLength: 321 };
+    }
+    assert.ok(command instanceof GetObjectCommand);
+    assert.equal(command.input.Key, `meta/${COLLECTION_ID}/${RESOURCE_ID}.json`);
+    return {
+      Body: { transformToString: async () => JSON.stringify({ createdAt: "2026-01-01T00:00:00Z", custom: { name: "Diploma" } }) },
+      ETag: '"m7"',
+    };
+  };
+  const res = await metaHandler(event("resource-meta"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers.ETag, '"m7"');
+  const body = JSON.parse(res.body);
+  assert.equal(body.contentType, "application/json");
+  assert.equal(body.size, 321);
+  assert.equal(body.custom.name, "Diploma");
+});
+
+test("resource meta GET: derived-only document when none is stored", async () => {
+  onSend = (command) => {
+    if (command instanceof HeadObjectCommand) {
+      return { ContentType: "application/json", ContentLength: 10 };
+    }
+    throw s3Error("NoSuchKey");
+  };
+  const res = await metaHandler(event("resource-meta"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers.ETag, undefined);
+  assert.deepEqual(JSON.parse(res.body), { contentType: "application/json", size: 10 });
+});
+
+test("resource meta GET: 404 when the resource does not exist", async () => {
+  onSend = () => {
+    const err = new Error("NotFound");
+    err.name = "NotFound";
+    throw err;
+  };
+  const res = await metaHandler(event("resource-meta"));
   assert.equal(res.statusCode, 404);
 });
 

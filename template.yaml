@@ -250,6 +250,44 @@ Resources:
             Path: /space/{space_id}/{collection_id}
             Method: post
 
+  # The /meta sub-resource at the collection and resource scopes: the
+  # user-writable metadata (plaintext {name, tags}, or an opaque envelope on
+  # an encrypted collection) with its own ETag-versioned concurrency,
+  # independent of the content ETag.
+  MetaFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/meta
+      Handler: app.lambdaHandler
+      Policies:
+        - S3CrudPolicy:
+            BucketName: '*'
+      Events:
+        GetCollectionMeta:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/meta
+            Method: get
+        PutCollectionMeta:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/meta
+            Method: put
+        GetResourceMeta:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/meta
+            Method: get
+        PutResourceMeta:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/meta
+            Method: put
+
   CollectionsGetFn:
     Type: AWS::Serverless::Function
     Properties:

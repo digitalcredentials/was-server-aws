@@ -8,7 +8,7 @@ const s3 = new S3Client({});
 
 // The collection's own metadata lives alongside its resources, so it must not
 // be deletable through the resource endpoint.
-const RESERVED_RESOURCE_IDS = new Set(["description.json"]);
+const RESERVED_RESOURCE_IDS = new Set(["description.json", "meta"]);
 
 // Deleted resources are moved here rather than removed; deleting a resource
 // that is already in the Trash removes it permanently.
