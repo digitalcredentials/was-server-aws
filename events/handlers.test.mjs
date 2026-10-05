@@ -211,9 +211,33 @@ test("collection GET with trailing slash: lists members, skipping reserved keys"
   );
 });
 
-test("collection GET: 404 when the description does not exist", async () => {
-  onSend = () => {
-    throw s3Error("NoSuchKey");
+test("collection GET: synthesizes the description for an implicit collection", async () => {
+  // No stored description, but the collection holds resources (e.g. Trash):
+  // the derived fields come back, so encryption-capable clients can resolve
+  // the collection as plaintext instead of failing closed.
+  onSend = (command) => {
+    if (command instanceof GetObjectCommand) {
+      throw s3Error("NoSuchKey");
+    }
+    assert.ok(command instanceof ListObjectsV2Command);
+    assert.equal(command.input.MaxKeys, 1);
+    return { Contents: [{ Key: `collections/${COLLECTION_ID}/${RESOURCE_ID}` }] };
+  };
+  const res = await collectionGet(event("collection-description-get"));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(res.body), {
+    id: COLLECTION_ID,
+    url: `/space/${SPACE_ID}/${COLLECTION_ID}`,
+    type: ["Collection"],
+  });
+});
+
+test("collection GET: 404 when the collection has no description and no resources", async () => {
+  onSend = (command) => {
+    if (command instanceof GetObjectCommand) {
+      throw s3Error("NoSuchKey");
+    }
+    return { Contents: [] };
   };
   const res = await collectionGet(event("collection-description-get"));
   assert.equal(res.statusCode, 404);
