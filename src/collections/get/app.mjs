@@ -86,7 +86,46 @@ export const lambdaHandler = async (event, context) => {
         body: content,
       };
     } catch (err) {
-      if (err.name === "NoSuchKey" || err.name === "NoSuchBucket") {
+      if (err.name === "NoSuchBucket") {
+        return {
+          statusCode: 404,
+          body: JSON.stringify({ message: "Not found" }),
+        };
+      }
+      if (err.name !== "NoSuchKey") {
+        throw err;
+      }
+    }
+
+    // No stored description. A collection that exists implicitly (resources
+    // were put into it without a configure, e.g. Trash) still has a readable
+    // Description: the derived fields are synthesized, the same way the space
+    // description GET derives its own. This matters to encryption-capable
+    // clients, which fail closed on an unreadable Description rather than
+    // assume plaintext. A collection with no resources at all stays 404.
+    try {
+      const { Contents } = await s3.send(new ListObjectsV2Command({
+        Bucket: space_id,
+        Prefix: `collections/${collection_id}/`,
+        MaxKeys: 1,
+      }));
+      if ((Contents ?? []).length === 0) {
+        return {
+          statusCode: 404,
+          body: JSON.stringify({ message: "Not found" }),
+        };
+      }
+      return {
+        statusCode: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: collection_id,
+          url: collectionPath,
+          type: ["Collection"],
+        }),
+      };
+    } catch (err) {
+      if (err.name === "NoSuchBucket") {
         return {
           statusCode: 404,
           body: JSON.stringify({ message: "Not found" }),
