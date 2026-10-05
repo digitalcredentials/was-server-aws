@@ -21,6 +21,15 @@ export const routes = {
     method: "GET",
     pathParameters: { space_id: SPACE_ID },
   },
+  // Creates a collection in the space (trailing slash: the space-items path).
+  "collection-create": {
+    resource: "/space/{space_id}/{collection_id}",
+    path: `/space/${SPACE_ID}/`,
+    method: "POST",
+    pathParameters: { space_id: SPACE_ID, collection_id: "" },
+    contentType: "application/json",
+    body: JSON.stringify({ id: "vault", name: "Vault", encryption: { scheme: "edv" } }),
+  },
   // Deletes a batch space (bucket + registry row).
   "space-delete": {
     resource: "/space/{space_id}",

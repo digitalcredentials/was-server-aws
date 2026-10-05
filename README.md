@@ -18,6 +18,7 @@ URLs carry no `/Prod` prefix.
 | POST | `/spaces` | `SpacesRegistryFn` | [src/spaces/registry](src/spaces/registry/app.mjs) |
 | GET | `/spaces` | `SpacesRegistryFn` | [src/spaces/registry](src/spaces/registry/app.mjs) |
 | DELETE | `/space/{space_id}` | `SpaceDeleteFn` | [src/spaces/delete](src/spaces/delete/app.mjs) |
+| POST | `/space/{space_id}/` | `CollectionsCreateFn` | [src/collections/create](src/collections/create/app.mjs) |
 | GET | `/space/{space_id}` | `SpaceDescriptionGetFn` | [src/spaces/description/get](src/spaces/description/get/app.mjs) |
 | GET | `/space/{space_id}/collections` | `SpaceCollectionsListGetFn` | [src/spaces/get](src/spaces/get/app.mjs) |
 | GET | `/space/{space_id}/{collection_id}` | `CollectionsGetFn` | [src/collections/get](src/collections/get/app.mjs) |
@@ -81,6 +82,19 @@ row. The standard authorizer verifies the invocation against the space's
 registered controller DID — the spec's rule that deletion requires a
 capability invoked by the controller. Only `batch` spaces may be deleted
 (403 otherwise).
+
+### `POST /space/{space_id}/`
+
+Creates a collection (the was-client's `createCollection`): the body carries
+the writable description fields and an optional `id`; without one the server
+generates a UUID. Responds **201** with the stored description (the client
+reads the `id` back) and a `Location` header. An existing collection is a
+**409** — this route is create-only, unlike the PUT route's update-or-create.
+Ids must be a single path segment, and `collections` and `policy` are reserved
+(they are the space's own sub-routes). A deployed HTTP API matches the
+trailing-slash path to the `{collection_id}` route with an empty final
+segment, so the function is registered on both forms and refuses a POST to a
+real collection path (405).
 
 ### `GET /space/{space_id}`
 
