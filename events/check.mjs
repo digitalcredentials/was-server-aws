@@ -8,7 +8,7 @@
 import { createRequire } from "node:module";
 
 import { lambdaHandler } from "../src/authorizer/app.mjs";
-import { controller, signedAuthorizerEvent } from "./sign.mjs";
+import { controller, signedAuthorizerEvent, signedHeaders } from "./sign.mjs";
 import { routes } from "./routes.mjs";
 
 // The authorizer resolves the space's controller DID with a keyed GetItem on
@@ -76,6 +76,31 @@ try {
   report("unregistered space denied", false, `threw "${err.message}" instead of denying`);
 }
 registryMisses = false;
+
+// API Gateway hands the authorizer rawPath percent-DECODED, while clients sign
+// the encoded path. A resource id with a comma or a space must still verify:
+// sign the encoded path, then deliver the event with the decoded rawPath, as
+// the deployed gateway does.
+{
+  const route = routeOrDie("resource-put");
+  const encodedId = "Sushi-Chef%2C-Digital%20Credentials.json";
+  const encodedRoute = {
+    ...route,
+    path: route.path.replace(/[^/]+$/, encodedId),
+  };
+  const event = authorizerEvent(encodedRoute, await signedHeaders(encodedRoute));
+  event.rawPath = decodeURIComponent(event.rawPath);
+  try {
+    const res = await lambdaHandler(event, {});
+    report(
+      "encoded resource id verifies against the decoded rawPath",
+      res.isAuthorized === true,
+      `isAuthorized=${res.isAuthorized}`
+    );
+  } catch (err) {
+    report("encoded resource id verifies against the decoded rawPath", false, `threw "${err.message}"`);
+  }
+}
 
 // A tampered signature must produce a denial ({ isAuthorized: false }), which
 // API Gateway answers with a 403 - never an allow, and never a thrown error

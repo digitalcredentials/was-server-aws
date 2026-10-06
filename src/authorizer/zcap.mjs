@@ -87,8 +87,10 @@ async function getVerifier({ keyId }) {
     const { headers = {} } = event
 
     // HTTP API authorizer payload v2: the method lives under
-    // requestContext.http and the path is rawPath. The $default stage serves
-    // at the root, so rawPath is exactly the path the client signed.
+    // requestContext.http and the path is rawPath. API Gateway hands the
+    // authorizer rawPath percent-DECODED ('%2C' arrives as ','), while clients
+    // sign the encoded form, so a path containing any encoded character
+    // (comma, space, ...) is also tried re-encoded below.
     const httpMethod = event.requestContext?.http?.method ?? event.httpMethod
     const path = event.rawPath ?? event.requestContext?.path ?? event.path
 
@@ -110,10 +112,21 @@ async function getVerifier({ keyId }) {
       throw new Error(`No account registered for space: ${spaceUrl}`)
     }
 
+    // The decoded path first (identical to the signed path whenever nothing
+    // in it was percent-encoded), then the re-encoded form the client signed.
+    const encodedPath = path
+      .split('/')
+      .map(segment => encodeURIComponent(segment))
+      .join('/')
+    const candidates = [url]
+    if (encodedPath !== path) {
+      candidates.push(proto + '://' + host + encodedPath)
+    }
+
     let result
-    try {
+    for (const candidate of candidates) {
       result = await verifyCapabilityInvocation({
-        url,
+        url: candidate,
         method: httpMethod,
         // The signature is computed over the lowercase header name.
         headers: { ...headers, authorization: getHeader(headers, 'Authorization') },
@@ -122,32 +135,12 @@ async function getVerifier({ keyId }) {
         documentLoader: rootCapabilityLoader(spaceController),
         expectedHost: host,
         expectedAction: httpMethod,
-        expectedTarget: url,
-        expectedRootCapability: 'urn:zcap:root:' + encodeURIComponent(url)
+        expectedTarget: candidate,
+        expectedRootCapability: 'urn:zcap:root:' + encodeURIComponent(candidate)
       })
-    } catch (err) {
-      // A signature that fails to verify throws before any result is
-      // returned. Log the inputs the server reconstructed the signed string
-      // from (method, URL, and each signed header's received value), so a
-      // mismatch with what the client signed can be pinpointed. The
-      // signature value itself is omitted.
-      const authorization = getHeader(headers, 'Authorization') ?? ''
-      const signedNames = authorization.match(/headers="([^"]+)"/)?.[1]?.split(' ') ?? []
-      const signedValues = Object.fromEntries(
-        signedNames
-          .filter(name => !name.startsWith('('))
-          .map(name => [name, getHeader(headers, name)])
-      )
-      console.error('signature verification inputs:', JSON.stringify({
-        method: httpMethod,
-        url,
-        keyId: authorization.match(/keyId="([^"]+)"/)?.[1],
-        created: authorization.match(/created="([^"]+)"/)?.[1],
-        expires: authorization.match(/expires="([^"]+)"/)?.[1],
-        signedNames,
-        signedValues
-      }))
-      throw err
+      if (result.verified) {
+        break
+      }
     }
 
     if (!result.verified) {
