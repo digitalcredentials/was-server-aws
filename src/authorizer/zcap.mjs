@@ -110,19 +110,45 @@ async function getVerifier({ keyId }) {
       throw new Error(`No account registered for space: ${spaceUrl}`)
     }
 
-    const result = await verifyCapabilityInvocation({
-      url,
-      method: httpMethod,
-      // The signature is computed over the lowercase header name.
-      headers: { ...headers, authorization: getHeader(headers, 'Authorization') },
-      suite: new Ed25519Signature2020(),
-      getVerifier,
-      documentLoader: rootCapabilityLoader(spaceController),
-      expectedHost: host,
-      expectedAction: httpMethod,
-      expectedTarget: url,
-      expectedRootCapability: 'urn:zcap:root:' + encodeURIComponent(url)
-    })
+    let result
+    try {
+      result = await verifyCapabilityInvocation({
+        url,
+        method: httpMethod,
+        // The signature is computed over the lowercase header name.
+        headers: { ...headers, authorization: getHeader(headers, 'Authorization') },
+        suite: new Ed25519Signature2020(),
+        getVerifier,
+        documentLoader: rootCapabilityLoader(spaceController),
+        expectedHost: host,
+        expectedAction: httpMethod,
+        expectedTarget: url,
+        expectedRootCapability: 'urn:zcap:root:' + encodeURIComponent(url)
+      })
+    } catch (err) {
+      // A signature that fails to verify throws before any result is
+      // returned. Log the inputs the server reconstructed the signed string
+      // from (method, URL, and each signed header's received value), so a
+      // mismatch with what the client signed can be pinpointed. The
+      // signature value itself is omitted.
+      const authorization = getHeader(headers, 'Authorization') ?? ''
+      const signedNames = authorization.match(/headers="([^"]+)"/)?.[1]?.split(' ') ?? []
+      const signedValues = Object.fromEntries(
+        signedNames
+          .filter(name => !name.startsWith('('))
+          .map(name => [name, getHeader(headers, name)])
+      )
+      console.error('signature verification inputs:', JSON.stringify({
+        method: httpMethod,
+        url,
+        keyId: authorization.match(/keyId="([^"]+)"/)?.[1],
+        created: authorization.match(/created="([^"]+)"/)?.[1],
+        expires: authorization.match(/expires="([^"]+)"/)?.[1],
+        signedNames,
+        signedValues
+      }))
+      throw err
+    }
 
     if (!result.verified) {
       console.log("in the verifyZcap function - Verification failed:", JSON.stringify(result, null, 2));
