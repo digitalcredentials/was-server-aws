@@ -319,6 +319,18 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - meta/space.json
+                  - policies/space.json
+        - Statement:
             - Effect: Allow
               Action: s3:GetObject
               Resource:
@@ -346,6 +358,17 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - meta/space.json
+        - Statement:
             - Effect: Allow
               Action: dynamodb:UpdateItem
               Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/wallet-spaces
@@ -370,6 +393,17 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/space.json
+        - Statement:
             - Effect: Allow
               Action: s3:GetObject
               Resource: arn:aws:s3:::dcc-was-*/policies/space.json
@@ -387,6 +421,17 @@ Resources:
       CodeUri: src/endpoints/space/policy-put
       Handler: app.lambdaHandler
       Policies:
+        - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/space.json
         - Statement:
             - Effect: Allow
               Action:
@@ -407,6 +452,17 @@ Resources:
       CodeUri: src/endpoints/space/policy-delete
       Handler: app.lambdaHandler
       Policies:
+        - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/space.json
         - Statement:
             - Effect: Allow
               Action:
@@ -463,6 +519,18 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - collections/*
+                  - meta/*
+        - Statement:
             - Effect: Allow
               Action:
                 - s3:GetObject
@@ -485,6 +553,18 @@ Resources:
       CodeUri: src/endpoints/resource/put
       Handler: app.lambdaHandler
       Policies:
+        - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - collections/*
+                  - meta/*
         - Statement:
             - Effect: Allow
               Action:
@@ -595,6 +675,17 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/*
+        - Statement:
             - Effect: Allow
               Action: s3:GetObject
               Resource: arn:aws:s3:::dcc-was-*/policies/*
@@ -612,6 +703,17 @@ Resources:
       CodeUri: src/endpoints/collection/policy-put
       Handler: app.lambdaHandler
       Policies:
+        - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/*
         - Statement:
             - Effect: Allow
               Action:
@@ -632,6 +734,17 @@ Resources:
       CodeUri: src/endpoints/collection/policy-delete
       Handler: app.lambdaHandler
       Policies:
+        - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/*
         - Statement:
             - Effect: Allow
               Action:
@@ -654,6 +767,19 @@ Resources:
       CodeUri: src/endpoints/resource/meta-get
       Handler: app.lambdaHandler
       Policies:
+        - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - collections/*
+                  - meta/*
+                  - policies/*
         - Statement:
             - Effect: Allow
               Action: s3:GetObject
@@ -682,6 +808,18 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - collections/*
+                  - meta/*
+        - Statement:
             - Effect: Allow
               Action: s3:GetObject
               Resource: arn:aws:s3:::dcc-was-*/collections/*
@@ -706,6 +844,17 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/*
+        - Statement:
             - Effect: Allow
               Action: s3:GetObject
               Resource: arn:aws:s3:::dcc-was-*/policies/*
@@ -723,6 +872,17 @@ Resources:
       CodeUri: src/endpoints/resource/policy-put
       Handler: app.lambdaHandler
       Policies:
+        - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/*
         - Statement:
             - Effect: Allow
               Action:
@@ -743,6 +903,17 @@ Resources:
       CodeUri: src/endpoints/resource/policy-delete
       Handler: app.lambdaHandler
       Policies:
+        - Statement:
+            # Without ListBucket, S3 answers a HEAD/GET of a missing key with
+            # 403 rather than 404; the prefix condition keeps it to this
+            # function's own keys.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - policies/*
         - Statement:
             - Effect: Allow
               Action:

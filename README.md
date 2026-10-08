@@ -153,6 +153,9 @@ operation touches, so a defect is bounded by the function it is in:
 
 - read functions have `s3:GetObject` on their prefix and on `policies/*`
   (the public-read cascade), nothing that writes or deletes;
+- every function that checks whether a key exists also has `s3:ListBucket`
+  conditioned on its own prefixes (`s3:prefix`): without it S3 answers a
+  `HEAD`/`GET` of a missing key with `403` rather than `404`;
 - write functions add `s3:PutObject` on their prefix, never `DeleteObject`;
 - delete functions add `s3:DeleteObject`, never `PutObject`;
 - only `SpacesPostFn` can create a bucket or write a registry row; only
