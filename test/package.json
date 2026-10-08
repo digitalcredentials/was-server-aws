@@ -1,0 +1,20 @@
+{
+  "name": "was-api-tests",
+  "version": "1.0.0",
+  "description": "In-process tests for the WAS API and a live conformance check",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test api.test.mjs",
+    "live": "node live.mjs"
+  },
+  "dependencies": {
+    "@interop/ed25519-verification-key": "^8.1.0",
+    "@interop/ed25519-signature": "^7.2.1",
+    "@interop/ezcap": "^7.4.3",
+    "@interop/http-client": "^1.0.5",
+    "@interop/http-signature-zcap-invoke": "^6.2.6",
+    "@interop/was-client": "^0.93.1",
+    "@interop/x25519-key-agreement-key": "^5.4.1"
+  }
+}
