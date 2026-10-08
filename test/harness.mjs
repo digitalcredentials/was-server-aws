@@ -8,7 +8,7 @@ import { signCapabilityInvocation } from "@interop/http-signature-zcap-invoke";
 import { Ed25519VerificationKey } from "@interop/ed25519-verification-key";
 
 import { lambdaHandler as authorizer } from "../src/authorizer/app.mjs";
-import { matchRoute } from "./routes.mjs";
+import { matchRoute, GATEWAY_404 } from "./routes.mjs";
 
 export const HOST = "localhost:3000";
 export const PROTO = "http";
@@ -105,7 +105,11 @@ export async function invoke({
     })
     .join("/");
 
-  const { route, params } = matchRoute(method, decodedPath);
+  const matched = matchRoute(method, decodedPath);
+  if (matched === null) {
+    return { status: 404, headers: GATEWAY_404.headers, body: GATEWAY_404.body, json: JSON.parse(GATEWAY_404.body), fn: null };
+  }
+  const { route, params } = matched;
   const delivered = deliveredJson !== undefined ? Buffer.from(JSON.stringify(deliveredJson)) : bodyBuffer;
   const event = {
     version: "2.0",

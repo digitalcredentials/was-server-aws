@@ -928,19 +928,96 @@ Resources:
             Path: /space/{space_id}/{collection_id}/{resource_id}/policy
             Method: delete
 
-  # Everything no route matched: the bare Space URL's 308, 405 for reserved
-  # segments this server does not implement, otherwise 404. No
-  # authorization, no permissions.
+  # The paths no endpoint owns: the bare Space URL (a 308 to its canonical
+  # form) and anything below a Resource (405 for reserved segments such as
+  # meta/log and chunks, else 404). Explicit routes rather than $default: a
+  # $default route would also receive the browser's CORS preflight (OPTIONS),
+  # which must reach the gateway's own CORS handling. No authorization, no
+  # permissions. A path outside these gets the gateway's own 404.
   DefaultFn:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/endpoints/default
       Handler: app.lambdaHandler
       Events:
-        Any:
+        BareSpaceGet:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}
+            Method: get
+            Auth:
+              Authorizer: NONE
+        BareSpaceHead:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}
+            Method: head
+            Auth:
+              Authorizer: NONE
+        BareSpacePut:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}
+            Method: put
+            Auth:
+              Authorizer: NONE
+        BareSpacePost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}
+            Method: post
+            Auth:
+              Authorizer: NONE
+        BareSpaceDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}
+            Method: delete
+            Auth:
+              Authorizer: NONE
+        BelowResourceGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/{proxy+}
+            Method: get
+            Auth:
+              Authorizer: NONE
+        BelowResourceHead:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/{proxy+}
+            Method: head
+            Auth:
+              Authorizer: NONE
+        BelowResourcePut:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/{proxy+}
+            Method: put
+            Auth:
+              Authorizer: NONE
+        BelowResourcePost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/{proxy+}
+            Method: post
+            Auth:
+              Authorizer: NONE
+        BelowResourceDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/{proxy+}
+            Method: delete
             Auth:
               Authorizer: NONE
 

@@ -44,12 +44,16 @@ test("HEAD / carries the link and no body", async () => {
   assert.equal(res.body, "");
 });
 
-test("an unknown path is a problem+json 404 that still carries the link", async () => {
-  const res = await invoke({ path: "/nothing/here", signer: null });
+test("an unknown path below a resource is a problem+json 404 that still carries the link", async () => {
+  const res = await invoke({ path: `/space/${SPACE}/c/r/nothing/here`, signer: null });
   assert.equal(res.status, 404);
   assert.equal(res.headers["content-type"], PROBLEM);
   assert.equal(res.json.type, "https://w3id.org/pws#not-found");
   assert.ok(res.headers.link);
+  // Outside every route the gateway answers its own 404.
+  const outside = await invoke({ path: "/nothing/here", signer: null });
+  assert.equal(outside.status, 404);
+  assert.equal(outside.fn, null);
 });
 
 // --- spaces repository ---------------------------------------------------------
