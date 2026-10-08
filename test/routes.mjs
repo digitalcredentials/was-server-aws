@@ -7,6 +7,7 @@
 const S = "/space/{space_id}";
 const C = `${S}/{collection_id}`;
 const R = `${C}/{resource_id}`;
+const ANY = ["GET", "HEAD", "PUT", "POST", "DELETE"];
 
 export const routes = [
   { methods: ["GET", "HEAD"], path: "/", fn: "service/get", auth: false },
@@ -39,24 +40,40 @@ export const routes = [
   { methods: ["GET", "HEAD"], path: `${R}/policy`, fn: "resource/policy-get" },
   { methods: ["PUT"], path: `${R}/policy`, fn: "resource/policy-put" },
   { methods: ["DELETE"], path: `${R}/policy`, fn: "resource/policy-delete" },
+
+  // The paths no endpoint owns (explicit routes, not $default, so the
+  // browser's OPTIONS preflight reaches the gateway's CORS handling).
+  { methods: ANY, path: S, fn: "default", auth: false },
+  { methods: ANY, path: `${R}/{proxy+}`, fn: "default", auth: false },
 ];
 
-export const DEFAULT_ROUTE = { fn: "default", auth: false };
+// A path no route matches gets the gateway's own 404, not a function.
+export const GATEWAY_404 = {
+  statusCode: 404,
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ message: "Not Found" }),
+};
 
 // Matches a delivered path against the table; returns the route and the
-// path parameters, or the default route.
+// path parameters, or null when no route matches.
 export function matchRoute(method, path) {
   const segments = path === "/" ? [""] : path.split("/").slice(1);
   let best = null;
   for (const route of routes) {
     if (!route.methods.includes(method)) continue;
     const pattern = route.path === "/" ? [""] : route.path.split("/").slice(1);
-    if (pattern.length !== segments.length) continue;
+    // A greedy {proxy+} in the last position takes the rest of the path.
+    const greedy = pattern[pattern.length - 1] === "{proxy+}";
+    if (greedy ? segments.length < pattern.length : pattern.length !== segments.length) continue;
     const params = {};
     let literals = 0;
     let ok = true;
     for (let index = 0; index < pattern.length; index++) {
       const part = pattern[index];
+      if (part === "{proxy+}") {
+        params.proxy = segments.slice(index).join("/");
+        break;
+      }
       const variable = /^\{(.+)\}$/.exec(part);
       if (variable) {
         params[variable[1]] = segments[index];
@@ -71,5 +88,6 @@ export function matchRoute(method, path) {
       best = { route, params, literals };
     }
   }
-  return best ? { route: best.route, params: best.params } : { route: DEFAULT_ROUTE, params: {} };
+  // No match: the gateway answers its own 404.
+  return best ? { route: best.route, params: best.params } : null;
 }
