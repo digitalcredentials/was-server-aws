@@ -1,23 +1,34 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Wallet Attached Storage API
+Description: Wallet Attached Storage API (WAS v0.5)
 
 Parameters:
-  # Base URL that provisioned space URLs are built from; a space lands at
-  # {SpaceBaseUrl}/{bucket name}.
+  # Base URL that provisioned space URLs are built from; a space's registry
+  # row is keyed {SpaceBaseUrl}/{bucket name}.
   SpaceBaseUrl:
     Type: String
     Default: https://was.lcw-sandbox.org/space
 
 Globals:
   Function:
-    Timeout: 3
     Runtime: nodejs24.x
+    Timeout: 10
+    Layers:
+      - !Ref WasLibLayer
+    Environment:
+      Variables:
+        # Spaces registry (table owned by the lcw-back-end stack): one row
+        # per Space, keyed by spaceURL, carrying the controller did, the type
+        # array and the name.
+        SPACES_TABLE_NAME: wallet-spaces
+        COUPONS_TABLE_NAME: was-coupons
+        SPACE_URL_BASE: !Ref SpaceBaseUrl
+        INSTANCE_VERSION: '0.5.0'
 
 Resources:
   # Space-creation coupons, owned by this stack: one row per coupon string.
   # Optional attributes: usesRemaining (N; absent = unlimited) and expiresAt
-  # (ISO timestamp; absent = never). POST /spaces redeems a coupon from here;
+  # (ISO timestamp; absent = never). POST /spaces/ redeems a coupon from here;
   # whoever administers the deployment mints rows (the wallet back end seeds
   # its registration code as an unlimited coupon).
   WasCouponsTable:
@@ -32,26 +43,23 @@ Resources:
         - AttributeName: coupon
           KeyType: HASH
 
-  # Unused since verifyZcap moved into src/authorizer and its deps were bundled
-  # into that function. Nothing imports /opt/nodejs/dcc-shared-layer-utils any
-  # more. The source is still in src/sharedLayer/ if this needs to come back.
-  # DCCSharedLayer:
-  #   Type: AWS::Serverless::LayerVersion
-  #   Properties:
-  #     ContentUri: src/sharedLayer/
-  #     CompatibleRuntimes:
-  #       - nodejs24.x
-  #   Metadata:
-  #     # gotta use a makefile because layers can't be built with esbuild, only functions can,
-  #     # and we need esbuild to use ESM modules and CJS modules together.
-  #     BuildMethod: makefile
+  # The code every endpoint function shares (layers/was-lib, resolved as
+  # `was-lib/...` from /opt/nodejs/node_modules). Plain ES modules with no
+  # dependency beyond the AWS SDK the runtime provides, so the layer is
+  # packaged as-is. The layer grants nothing: each function's role bounds
+  # what the shared code may do when running in that function.
+  WasLibLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: was-lib
+      ContentUri: layers/was-lib
+      CompatibleRuntimes:
+        - nodejs24.x
+      RetentionPolicy: Delete
 
-
-  # The shared API Gateway. An HTTP API rather than a REST API: its CORS is a
-  # real gateway feature that injects the headers into every response (on a
-  # REST API only the OPTIONS preflight can be configured centrally; each
-  # proxied response would have to carry its own headers). It also serves the
-  # $default stage at the root, so URLs carry no /Prod prefix.
+  # An HTTP API rather than a REST API: its CORS is a gateway feature that
+  # injects the headers into every response, and its $default stage serves
+  # at the root, so URLs carry no stage prefix.
   WASHttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -65,46 +73,50 @@ Resources:
             FunctionArn: !GetAtt WASZcapAuthorizerFn.Arn
             # No Identity.Headers: an identity source would make API Gateway
             # answer unsigned requests itself with a 401, and unsigned GETs
-            # must reach the authorizer for the public-read policy check.
+            # must reach the functions for the public-read policy check.
             Identity:
               # Every zcap invocation is signed over its own request, so a
-              # cached authorization decision would be meaningless. 0 disables
+              # cached authorization result would be meaningless. 0 disables
               # the authorizer result cache.
               ReauthorizeEvery: 0
       CorsConfiguration:
         AllowMethods:
           - GET
+          - HEAD
           - POST
           - PUT
           - DELETE
           - OPTIONS
         # '*' covers the signed headers (authorization, capability-invocation,
-        # digest, date) and anything a client adds later.
+        # digest, date, if-match, key-epoch, ...) and anything a client adds.
         AllowHeaders:
           - '*'
         AllowOrigins:
           - '*'
+        # A browser client needs the validators and the discovery link.
+        ExposeHeaders:
+          - ETag
+          - Location
+          - Link
+          - Last-Modified
+          - Content-Type
+        MaxAge: 600
 
-  # Verifies the zcap invocation for every route on WASHttpApi.
+  # Verifies the capability invocation of every signed request and reports
+  # the result in the request context (signed, verified, controller,
+  # delegated, spaceController, spaceType, or space=missing). It never
+  # denies: a gateway denial is always a 403, and the spec's answers to an
+  # unauthorized request are shaped by the endpoint functions.
   WASZcapAuthorizerFn:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/authorizer
       Handler: app.lambdaHandler
-      # No layer: the zcap verification deps are bundled into the function.
-      Timeout: 10
-      Environment:
-        Variables:
-          # Spaces registry (owned by the lcw-back-end stack): one row per
-          # WAS space, keyed by spaceURL, carrying the controller did and the
-          # space's type ('credential' | 'batch').
-          SPACES_TABLE_NAME: wallet-spaces
+      # The verification stack is bundled; the shared layer is not needed.
+      Layers: []
       Policies:
         - DynamoDBReadPolicy:
             TableName: wallet-spaces
-        # Public-read checks read policy documents from the space buckets
-        - S3ReadPolicy:
-            BucketName: '*'
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -118,445 +130,653 @@ Resources:
           - .js=.mjs
         EntryPoints:
           - app.mjs
+        # createRequire lets the bundled CJS dependencies work inside an ESM
+        # output.
         Banner:
           - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
 
-  # The space registry endpoints (POST /spaces, GET /spaces) of the WAS spec.
-  # These routes have no space in their URL, so the standard authorizer cannot
-  # resolve a controller for them; they verify the zcap invocation in-handler
-  # instead (POST against the controller DID in the body, per the spec; GET
-  # against the DID that signed the invocation). Space creation additionally
-  # requires redeeming a coupon from the was-coupons table. The server knows
-  # nothing about wallet accounts.
-  SpacesRegistryFn:
+  # ---------------------------------------------------------------------------
+  # One function per endpoint. Each carries only the actions and key prefixes
+  # its operation touches: a read function cannot write or delete, a
+  # function on one prefix (meta/, policies/, collections/) cannot reach
+  # another, and only the two Space-level functions can create or delete a
+  # bucket or a registry row. Functions that serve unsigned public reads also
+  # read policies/* for the PublicCanRead cascade.
+  # ---------------------------------------------------------------------------
+
+  # GET / -- the service description. No authorization, no permissions.
+  ServiceGetFn:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/spaces/registry
+      CodeUri: src/endpoints/service/get
       Handler: app.lambdaHandler
-      # zcap verification resolves did:key documents; same budget as the
-      # authorizer.
-      Timeout: 10
-      Environment:
-        Variables:
-          SPACES_TABLE_NAME: wallet-spaces
-          COUPONS_TABLE_NAME: !Ref WasCouponsTable
-          SPACE_URL_BASE: !Ref SpaceBaseUrl
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /
+            Method: get
+            Auth:
+              Authorizer: NONE
+        Head:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /
+            Method: head
+            Auth:
+              Authorizer: NONE
+
+  # POST /spaces/ -- provision a Space: a bucket with its metadata object, a
+  # registry row, and a redeemed coupon.
+  SpacesPostFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/spaces/post
+      Handler: app.lambdaHandler
       Policies:
-        - DynamoDBCrudPolicy:
+        - DynamoDBWritePolicy:
             TableName: wallet-spaces
-        # Redeeming a finite coupon decrements its usesRemaining.
         - DynamoDBCrudPolicy:
             TableName: !Ref WasCouponsTable
-        # Space buckets all share the dcc-was- prefix, so bucket provisioning
-        # is scoped to it.
         - Statement:
             - Effect: Allow
-              Action:
-                - s3:CreateBucket
-                - s3:PutObject
-              Resource:
-                - arn:aws:s3:::dcc-was-*
-                - arn:aws:s3:::dcc-was-*/*
+              Action: s3:CreateBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/meta/space.json
       Events:
-        CreateSpace:
+        Post:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /spaces
             Method: post
-            Auth:
-              Authorizer: NONE
-        ListSpaces:
+        PostSlash:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /spaces/{p}
+            Method: post
+
+  # GET /spaces/ -- the signer's Spaces, from the registry's by-did index.
+  SpacesGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/spaces/get
+      Handler: app.lambdaHandler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: wallet-spaces
+      Events:
+        Get:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /spaces
             Method: get
-            Auth:
-              Authorizer: NONE
-    Metadata:
-      BuildMethod: esbuild
-      BuildProperties:
-        Minify: true
-        Target: "es2022"
-        Format: "esm"
-        Platform: "node"
-        External:
-          - "@aws-sdk/*"
-        OutExtension:
-          - .js=.mjs
-        EntryPoints:
-          - app.mjs
-        Banner:
-          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+        GetSlash:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /spaces/{p}
+            Method: get
 
-  # DELETE /space/{space_id}: deletes a batch space (bucket + registry row).
-  # Runs behind the standard authorizer, which verifies the invocation against
-  # the space's registered controller DID — the spec's deletion rule.
+  # GET /space/{s}/ -- the Space's Collections. The gateway delivers the
+  # trailing-slash container URL to the {collection_id} route with an empty
+  # id; a non-empty id (the bare Collection URL) is answered with a 308.
+  SpaceCollectionsGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/collections-get
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}
+            Method: get
+        Head:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}
+            Method: head
+
+  # POST /space/{s}/ -- create a Collection (its metadata object).
+  CollectionCreateFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/collection-create
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/meta/*
+      Events:
+        Post:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}
+            Method: post
+
+  # DELETE /space/{s}/ -- the whole Space: empty and remove the bucket, then
+  # the registry row. The only function that can delete a bucket.
   SpaceDeleteFn:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/spaces/delete
+      CodeUri: src/endpoints/space/delete
       Handler: app.lambdaHandler
-      # Emptying a bucket can outlast the 3s default.
-      Timeout: 30
-      Environment:
-        Variables:
-          SPACES_TABLE_NAME: wallet-spaces
+      # Emptying a bucket can outlast the default.
+      Timeout: 60
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: wallet-spaces
         - Statement:
             - Effect: Allow
               Action:
+                - dynamodb:DeleteItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/wallet-spaces
+            - Effect: Allow
+              Action:
                 - s3:ListBucket
-                - s3:DeleteObject
                 - s3:DeleteBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:DeleteObject
+              Resource: arn:aws:s3:::dcc-was-*/*
+      Events:
+        Delete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}
+            Method: delete
+
+  # GET /space/{s}/meta
+  SpaceMetaGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/meta-get
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*
-                - arn:aws:s3:::dcc-was-*/*
+                - arn:aws:s3:::dcc-was-*/meta/space.json
+                - arn:aws:s3:::dcc-was-*/policies/space.json
       Events:
-        DeleteSpace:
+        Get:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}
+            Path: /space/{space_id}/meta
+            Method: get
+        Head:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/meta
+            Method: head
+
+  # PUT /space/{s}/meta -- also mirrors the name to the registry row.
+  SpaceMetaPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/meta-put
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/wallet-spaces
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/meta/space.json
+      Events:
+        Put:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/meta
+            Method: put
+
+  # /space/{s}/policy
+  SpacePolicyGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/policy-get
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/space.json
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/policy
+            Method: get
+
+  SpacePolicyPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/policy-put
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/space.json
+      Events:
+        Put:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/policy
+            Method: put
+
+  SpacePolicyDeleteFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/policy-delete
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/space.json
+      Events:
+        Delete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/policy
             Method: delete
 
-  # POST /space/{space_id}/ — create a collection (server-generated id unless
-  # the body carries one). Registered on both the bare space path and the
-  # {collection_id} route: a deployed HTTP API matches the trailing-slash form
-  # to the latter with an empty final segment, and the handler refuses a POST
-  # to a real collection path.
-  CollectionsCreateFn:
+  # GET /space/{s}/{c}/{r} -- a Resource's content; with an empty
+  # resource_id (the gateway's reading of /space/{s}/{c}/), the Collection's
+  # listing.
+  ResourceGetFn:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/collections/create
+      CodeUri: src/endpoints/resource/get
       Handler: app.lambdaHandler
       Policies:
-        - S3CrudPolicy:
-            BucketName: '*'
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*
+                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-was-*/policies/*
       Events:
-        CreateCollection:
+        Get:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}
-            Method: post
-        CreateCollectionSlash:
+            Path: /space/{space_id}/{collection_id}/{resource_id}
+            Method: get
+        Head:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}
+            Path: /space/{space_id}/{collection_id}/{resource_id}
+            Method: head
+
+  # POST /space/{s}/{c}/ -- create a Resource with a server-assigned id (a
+  # first write into a new Collection also writes its metadata object).
+  ResourceCreateFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/resource/create
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*
+                - arn:aws:s3:::dcc-was-*/meta/*
+      Events:
+        Post:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}
             Method: post
 
-  # The /meta sub-resource at the collection and resource scopes: the
-  # user-writable metadata (plaintext {name, tags}, or an opaque envelope on
-  # an encrypted collection) with its own ETag-versioned concurrency,
-  # independent of the content ETag.
-  MetaFn:
+  # PUT /space/{s}/{c}/{r} -- create or replace a Resource.
+  ResourcePutFn:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/meta
+      CodeUri: src/endpoints/resource/put
       Handler: app.lambdaHandler
       Policies:
-        - S3CrudPolicy:
-            BucketName: '*'
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*
+                - arn:aws:s3:::dcc-was-*/meta/*
       Events:
-        GetCollectionMeta:
+        Put:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}
+            Method: put
+
+  # DELETE /space/{s}/{c}/{r} -- a Resource with its metadata and policy;
+  # with an empty resource_id, the whole Collection.
+  ResourceDeleteFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/resource/delete
+      Handler: app.lambdaHandler
+      Timeout: 60
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*
+                - arn:aws:s3:::dcc-was-*/meta/*
+            - Effect: Allow
+              Action: s3:DeleteObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*
+                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Delete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}
+            Method: delete
+
+  # /space/{s}/{c}/meta -- Collection Metadata (an implicit collection's is
+  # synthesized from the presence of content, hence ListBucket).
+  CollectionMetaGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/collection/meta-get
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Get:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/meta
             Method: get
-        PutCollectionMeta:
+        Head:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/meta
+            Method: head
+
+  CollectionMetaPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/collection/meta-put
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/meta/*
+      Events:
+        Put:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/meta
             Method: put
-        GetResourceMeta:
+
+  # /space/{s}/{c}/policy
+  CollectionPolicyGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/collection/policy-get
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/policy
+            Method: get
+
+  CollectionPolicyPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/collection/policy-put
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Put:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/policy
+            Method: put
+
+  CollectionPolicyDeleteFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/collection/policy-delete
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Delete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/policy
+            Method: delete
+
+  # /space/{s}/{c}/{r}/meta -- Resource Metadata (derived from the content
+  # object's head, plus the stored annotation).
+  ResourceMetaGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/resource/meta-get
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*
+                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Get:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}/meta
             Method: get
-        PutResourceMeta:
+        Head:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/{resource_id}/meta
+            Method: head
+
+  ResourceMetaPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/resource/meta-put
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/collections/*
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/meta/*
+      Events:
+        Put:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}/meta
             Method: put
 
-  CollectionsGetFn:
+  # /space/{s}/{c}/{r}/policy
+  ResourcePolicyGetFn:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/collections/get
-      Handler: app.lambdaHandler
-      # Layers:
-      #   - !Ref DCCSharedLayer # References the layer above
-      Policies:
-        - S3ReadPolicy:
-            BucketName: '*'
-      Events:
-        GetCollection:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}
-            Method: get
-  
-  SpaceCollectionsListGetFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/spaces/get
-      Handler: app.lambdaHandler
-      # Layers:
-      #   - !Ref DCCSharedLayer # References the layer above
-      Policies:
-        - S3ReadPolicy:
-            BucketName: '*'
-      Events:
-        GetCollection:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/collections
-            Method: get
-
-  SpaceDescriptionGetFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/spaces/description/get
-      Handler: app.lambdaHandler
-      # Layers:
-      #   - !Ref DCCSharedLayer # References the layer above
-      Policies:
-        - S3ReadPolicy:
-            BucketName: '*'
-      Events:
-        GetSpaceDescription:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}
-            Method: get
-
-  # Update the space's description document.
-  SpaceDescriptionPutFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/spaces/description/put
+      CodeUri: src/endpoints/resource/policy-get
       Handler: app.lambdaHandler
       Policies:
-        - S3WritePolicy:
-            BucketName: '*'
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/*
       Events:
-        PutSpaceDescription:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}
-            Method: put
-
-  # Update-or-create a collection description by id.
-  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#update-or-create-by-id-collection-operation
-  CollectionsPutFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/collections/put
-      Handler: app.lambdaHandler
-      Policies:
-        # Crud (not Write) because the handler HeadObjects first to decide
-        # between 201 Created and 204 No Content.
-        - S3CrudPolicy:
-            BucketName: '*'
-      Events:
-        PutCollection:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}
-            Method: put
-
-  # Update-or-create a resource in a collection.
-  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#http-api-put-space-space_id-collection_id-resource_id
-  ResourcesPutFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/resources/put
-      Handler: app.lambdaHandler
-      Policies:
-        # Crud (not Write) because the handler HeadObjects first to decide
-        # between 201 Created and 204 No Content.
-        - S3CrudPolicy:
-            BucketName: '*'
-      Events:
-        PutResource:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}/{resource_id}
-            Method: put
-
-  # Read a resource from a collection.
-  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#http-api-get-space-space_id-collection_id-resource_id
-  ResourcesGetFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/resources/get
-      Handler: app.lambdaHandler
-      Policies:
-        - S3ReadPolicy:
-            BucketName: '*'
-      Events:
-        GetResource:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}/{resource_id}
-            Method: get
-
-  # Delete a resource: moves it into the space's Trash collection (a delete
-  # from Trash itself removes it permanently).
-  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#http-api-delete-space-space_id-collection_id-resource_id
-  ResourcesDeleteFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/resources/delete
-      Handler: app.lambdaHandler
-      Policies:
-        # Crud: the soft delete copies the object into Trash (read + write)
-        # before removing the original.
-        - S3CrudPolicy:
-            BucketName: '*'
-      Events:
-        DeleteResource:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}/{resource_id}
-            Method: delete
-
-  # Access-control policies at all three scopes; the authorizer enforces
-  # PublicCanRead for unsigned reads.
-  # https://w3c-ccg.github.io/wallet-attached-storage-spec/#access-control
-  PoliciesFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/policies
-      Handler: app.lambdaHandler
-      Policies:
-        - S3CrudPolicy:
-            BucketName: '*'
-      Events:
-        SpacePolicyGet:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/policy
-            Method: get
-        SpacePolicyPut:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/policy
-            Method: put
-        SpacePolicyDelete:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/policy
-            Method: delete
-        CollectionPolicyGet:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}/policy
-            Method: get
-        CollectionPolicyPut:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}/policy
-            Method: put
-        CollectionPolicyDelete:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref WASHttpApi
-            Path: /space/{space_id}/{collection_id}/policy
-            Method: delete
-        ResourcePolicyGet:
+        Get:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}/policy
             Method: get
-        ResourcePolicyPut:
+
+  ResourcePolicyPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/resource/policy-put
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Put:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}/policy
             Method: put
-        ResourcePolicyDelete:
+
+  ResourcePolicyDeleteFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/resource/policy-delete
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Delete:
           Type: HttpApi
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/{resource_id}/policy
             Method: delete
+
+  # Everything no route matched: the bare Space URL's 308, 405 for reserved
+  # segments this server does not implement, otherwise 404. No
+  # authorization, no permissions.
+  DefaultFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/default
+      Handler: app.lambdaHandler
+      Events:
+        Any:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Auth:
+              Authorizer: NONE
 
 Outputs:
-  WASZcapAuthorizerFn:
-    Description: zCap REQUEST authorizer Lambda Function ARN
-    Value: !GetAtt WASZcapAuthorizerFn.Arn
-  WASZcapAuthorizerFnIamRole:
-    Description: Implicit IAM Role created for the zCap authorizer function
-    Value: !GetAtt WASZcapAuthorizerFnRole.Arn
-  CollectionsApi:
-    Description: API Gateway endpoint URL for Collections endpoint of WAS API
-    Value: !Sub https://${WASHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/space/{space_id}/{collection_id}
-  ResourcesApi:
-    Description: API Gateway endpoint URL for Resources endpoint of WAS API
-    Value: !Sub https://${WASHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/space/{space_id}/{collection_id}/{resource_id}
   ApiEndpoint:
-    Description: "API Gateway HTTP backend URL"
-    Value: !Sub "https://${WASHttpApi}.execute-api.${AWS::Region}://"
-  CollectionsGetFn:
-    Description: GET Collections Lambda Function ARN
-    Value: !GetAtt CollectionsGetFn.Arn
-  CollectionsGetFnIamRole:
-    Description: Implicit IAM Role created for GET Collections function
-    Value: !GetAtt CollectionsGetFnRole.Arn
-  SpaceCollectionsListGetFn:
-    Description: GET Space collections list Lambda Function ARN
-    Value: !GetAtt SpaceCollectionsListGetFn.Arn
-  SpaceCollectionsListGetFnIamRole:
-    Description: Implicit IAM Role created for GET Space collections list function
-    Value: !GetAtt SpaceCollectionsListGetFnRole.Arn
-  SpaceDescriptionApi:
-    Description: API Gateway endpoint URL for the Space description endpoint of WAS API
-    Value: !Sub https://${WASHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/space/{space_id}
-  SpaceDescriptionGetFn:
-    Description: GET Space description Lambda Function ARN
-    Value: !GetAtt SpaceDescriptionGetFn.Arn
-  SpaceDescriptionGetFnIamRole:
-    Description: Implicit IAM Role created for GET Space description function
-    Value: !GetAtt SpaceDescriptionGetFnRole.Arn
-  CollectionsPutFn:
-    Description: PUT Collection Lambda Function ARN
-    Value: !GetAtt CollectionsPutFn.Arn
-  CollectionsPutFnIamRole:
-    Description: Implicit IAM Role created for PUT Collection function
-    Value: !GetAtt CollectionsPutFnRole.Arn
-  ResourcesPutFn:
-    Description: PUT Resource Lambda Function ARN
-    Value: !GetAtt ResourcesPutFn.Arn
-  ResourcesPutFnIamRole:
-    Description: Implicit IAM Role created for PUT Resource function
-    Value: !GetAtt ResourcesPutFnRole.Arn
-  ResourcesGetFn:
-    Description: GET Resource Lambda Function ARN
-    Value: !GetAtt ResourcesGetFn.Arn
-  ResourcesGetFnIamRole:
-    Description: Implicit IAM Role created for GET Resource function
-    Value: !GetAtt ResourcesGetFnRole.Arn
+    Description: The API's base URL (the service description is at its root)
+    Value: !Sub "https://${WASHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
+  WasLibLayer:
+    Description: The shared-code layer ARN
+    Value: !Ref WasLibLayer

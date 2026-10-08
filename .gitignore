@@ -1,8 +1,10 @@
 # SAM build artifacts
 .aws-sam/
 
-# Dependencies
+# Dependencies (the shared layer lives under a node_modules path on purpose
+# and is source, not an install)
 node_modules/
+!layers/was-lib/nodejs/node_modules/
 
 # Environment files
 .env

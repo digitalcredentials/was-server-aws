@@ -1,160 +1,92 @@
-import {
-  securityLoader
-} from '@interop/security-document-loader'
-import {
-  verifyCapabilityInvocation
-} from '@interop/http-signature-zcap-verify'
+import { securityLoader } from "@interop/security-document-loader";
+import { verifyCapabilityInvocation } from "@interop/http-signature-zcap-verify";
+import * as didKey from "@interop/did-method-key";
+import { Ed25519VerificationKey } from "@interop/ed25519-verification-key";
+import { Ed25519Signature2020 } from "@interop/ed25519-signature";
 
-import * as didKey from '@interop/did-method-key'
-import { Ed25519VerificationKey } from '@interop/ed25519-verification-key'
-import { Ed25519Signature2020 } from '@interop/ed25519-signature'
-import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb'
+// Capability-invocation verification. A request is authorized by a zcap
+// invocation signed by `controller`: every urn:zcap:root:{url} resolves to
+// a root capability controlled by that DID, so verification itself rejects
+// anything signed by another key, and a delegation chain must start from
+// the invoked URL's root or one of the container roots passed in.
 
-const didKeyDriver = didKey.driver()
+const didKeyDriver = didKey.driver();
 didKeyDriver.use({
-  multibaseMultikeyHeader: 'z6Mk',
-  fromMultibase: Ed25519VerificationKey.from
-})
+  multibaseMultikeyHeader: "z6Mk",
+  fromMultibase: Ed25519VerificationKey.from,
+});
 
-const baseDocumentLoader = securityLoader()
-
-const dynamoClient = new DynamoDBClient()
-const SPACES_TABLE_NAME = process.env.SPACES_TABLE_NAME ?? 'wallet-spaces'
-
-// The space URL is everything in the request URL up to and including the
-// {space_id} segment, matching the spaceURL registered for the account.
-function getSpaceUrl(url) {
-  const match = url.match(/^(.*?\/space\/[^/?#]+)/)
-  return match?.[1]
-}
-
-// Looks up the DID registered for the space in the wallet-spaces registry
-// (owned by the lcw-back-end stack), which is keyed by the space URL and is
-// the authority on spaces: every space is registered there at creation. A
-// space with no row is simply not a space anyone controls.
-async function getSpaceControllerDid(spaceUrl) {
-  const { Item: item } = await dynamoClient.send(new GetItemCommand({
-    TableName: SPACES_TABLE_NAME,
-    Key: { spaceURL: { S: spaceUrl } }
-  }))
-  // Registered DIDs may carry a key fragment (did:key:z6Mk...#z6Mk...)
-  return item?.did?.S?.split('#')[0]
-}
-
-function rootCapabilityLoader(spaceController) {
-  const loader = baseDocumentLoader.clone()
-
-  loader.setProtocolHandler({
-    protocol: 'urn',
-    handler: {
-      get: async ({ id, url }) => {
-        const resolvedUrl = url || id
-        const rootZcapTarget = decodeURIComponent(
-          resolvedUrl.split('urn:zcap:root:')[1]
-        )
-        return {
-          '@context': 'https://w3id.org/zcap/v1',
-          id: resolvedUrl,
-          invocationTarget: rootZcapTarget,
-          controller: spaceController,
-        }
-      }
-    }
-  })
-  return loader.build()
-}
+const baseDocumentLoader = securityLoader();
 
 async function getVerifier({ keyId }) {
-    const didDocument = await didKeyDriver.get({ url: keyId })
-    const key = await Ed25519VerificationKey.from(didDocument)
-    const verifier = key.verifier()
-    return {
-      verifier,
-      verificationMethod: didDocument
-    }
-  }
+  const didDocument = await didKeyDriver.get({ url: keyId });
+  const key = await Ed25519VerificationKey.from(didDocument);
+  return { verifier: key.verifier(), verificationMethod: didDocument };
+}
 
-  // API Gateway passes headers through with whatever casing the client sent, so
-  // anything we read out of them has to be looked up case-insensitively.
-  function getHeader(headers, name) {
-    const match = Object.keys(headers).find(
-      key => key.toLowerCase() === name.toLowerCase()
-    )
-    return match === undefined ? undefined : headers[match]
-  }
+function rootCapabilityLoader(controller) {
+  const loader = baseDocumentLoader.clone();
+  loader.setProtocolHandler({
+    protocol: "urn",
+    handler: {
+      get: async ({ id, url }) => {
+        const resolvedUrl = url || id;
+        const target = decodeURIComponent(resolvedUrl.split("urn:zcap:root:")[1]);
+        return {
+          "@context": "https://w3id.org/zcap/v1",
+          id: resolvedUrl,
+          invocationTarget: target,
+          controller,
+        };
+      },
+    },
+  });
+  return loader.build();
+}
 
-  export const verifyZcap = async (event) => {
-    const { headers = {} } = event
+export const rootCapabilityId = (url) => `urn:zcap:root:${encodeURIComponent(url)}`;
 
-    // HTTP API authorizer payload v2: the method lives under
-    // requestContext.http and the path is rawPath. API Gateway hands the
-    // authorizer rawPath percent-DECODED ('%2C' arrives as ','), while clients
-    // sign the encoded form, so a path containing any encoded character
-    // (comma, space, ...) is also tried re-encoded below.
-    const httpMethod = event.requestContext?.http?.method ?? event.httpMethod
-    const path = event.rawPath ?? event.requestContext?.path ?? event.path
-
-    const host = getHeader(headers, 'Host')
-    const proto = getHeader(headers, 'X-Forwarded-Proto') ?? 'https'
-
-    // The invoked capability's target should match the resource actually being requested.
-    const url = proto + '://' + host + path
-
-    // The root capability for the space is controlled by the DID registered
-    // for it in the accounts table, so verification rejects invocations
-    // signed by any other key.
-    const spaceUrl = getSpaceUrl(url)
-    if (!spaceUrl) {
-      throw new Error(`No space URL in request URL: ${url}`)
-    }
-    const spaceController = await getSpaceControllerDid(spaceUrl)
-    if (!spaceController) {
-      throw new Error(`No account registered for space: ${spaceUrl}`)
-    }
-
-    // The decoded path first (identical to the signed path whenever nothing
-    // in it was percent-encoded), then the re-encoded form the client signed.
-    const encodedPath = path
-      .split('/')
-      .map(segment => encodeURIComponent(segment))
-      .join('/')
-    const candidates = [url]
-    if (encodedPath !== path) {
-      candidates.push(proto + '://' + host + encodedPath)
-    }
-
-    let result
-    for (const candidate of candidates) {
-      result = await verifyCapabilityInvocation({
-        url: candidate,
-        method: httpMethod,
+// Verifies that the request carries an invocation of one of `urls` (the
+// delivered URL and, when ids were percent-encoded, the re-encoded URL the
+// client signed) authorized by `controller`. Resolves to
+// { controller, delegated } or null, with the reason logged.
+export async function verifyInvocation({ method, host, headers }, { controller, urls, roots = [] }) {
+  const documentLoader = rootCapabilityLoader(controller);
+  let error;
+  for (const url of urls) {
+    try {
+      const result = await verifyCapabilityInvocation({
+        url,
+        method,
         // The signature is computed over the lowercase header name.
-        headers: { ...headers, authorization: getHeader(headers, 'Authorization') },
+        headers,
         suite: new Ed25519Signature2020(),
         getVerifier,
-        documentLoader: rootCapabilityLoader(spaceController),
+        documentLoader,
         expectedHost: host,
-        expectedAction: httpMethod,
-        expectedTarget: candidate,
-        expectedRootCapability: 'urn:zcap:root:' + encodeURIComponent(candidate)
-      })
+        expectedAction: method,
+        expectedTarget: url,
+        expectedRootCapability: [rootCapabilityId(url), ...roots],
+        allowTargetAttenuation: true,
+      });
       if (result.verified) {
-        break
+        const capability = result.capability;
+        return {
+          controller: result.controller ?? controller,
+          delegated: typeof capability === "object" && capability !== null && "parentCapability" in capability,
+        };
       }
+      error = result.error;
+    } catch (err) {
+      error = err;
     }
-
-    if (!result.verified) {
-      console.log("in the verifyZcap function - Verification failed:", JSON.stringify(result, null, 2));
-      // `result.error` describes why verification failed (bad signature,
-      // unexpected host, expired capability, unauthorized key, etc.)
-      console.log(JSON.stringify(result, null, 2));
-      throw result.error
-    }
-
-    // On success, `result` also includes the invoked `capability`,
-    // `capabilityAction`, the `controller`/`invoker`, the `verificationMethod`,
-    // and the `dereferencedChain`.
-   // console.log('invoked by', result.controller)
-   // console.log('result', JSON.stringify(result, null, 2));
-    return result
   }
+  console.error("Invocation rejected:", error?.message ?? error);
+  return null;
+}
+
+// The signer's DID from the HTTP signature's keyId (did:key:z6Mk...#z6Mk...).
+export function signerDid(authorization) {
+  const keyId = authorization?.match(/keyId="([^"]+)"/)?.[1];
+  return keyId?.startsWith("did:key:") ? keyId.split("#")[0] : undefined;
+}

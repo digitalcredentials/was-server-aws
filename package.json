@@ -5,10 +5,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "npm --prefix events test"
+    "test": "npm --prefix test test",
+    "live": "npm --prefix test run live"
   },
   "devDependencies": {
     "@aws-sdk/client-dynamodb": "^3.1145.0",
     "@aws-sdk/client-s3": "^3.600.0"
+  },
+  "dependencies": {
+    "was-lib": "file:layers/was-lib/nodejs/node_modules/was-lib"
   }
 }

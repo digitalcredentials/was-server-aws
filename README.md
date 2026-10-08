@@ -1,509 +1,314 @@
-# Wallet Attached Storage (WAS) API
+# Wallet Attached Storage (WAS) server
 
-An implementation of part of the [W3C CCG Wallet Attached Storage
-specification](https://w3c-ccg.github.io/wallet-attached-storage-spec/), built as
-AWS Lambda functions behind an API Gateway HTTP API, with objects stored in S3.
-
-Requests are authorized with signed zCap (Authorization Capability) invocations,
-verified by a single Lambda REQUEST authorizer rather than by each handler. An
-HTTP API (rather than a REST API) because its CORS is a real gateway feature
-injected into every response — on a REST API only the OPTIONS preflight can be
-configured centrally — and because its `$default` stage serves at the root, so
-URLs carry no `/Prod` prefix.
+An implementation of the [W3C CCG Wallet Attached Storage specification](https://w3c-ccg.github.io/wallet-attached-storage-spec/)
+v0.5 on AWS: one Lambda function per endpoint behind an API Gateway HTTP
+API, a gateway authorizer that verifies capability invocations, a layer of
+shared code, each Space in its own S3 bucket, and the Space registry in
+DynamoDB. The reference client is [`@interop/was-client`](https://www.npmjs.com/package/@interop/was-client)
+(0.93 and later), which is what the Learner Credential Wallet uses; the live
+conformance check in [test/live.mjs](test/live.mjs) drives this server
+through that client.
 
 ## Endpoints
 
-| Method | Path | Function | Source |
+One function per endpoint ([src/endpoints/](src/endpoints/), each a short
+file naming its operation). Container URLs are canonically trailing-slash
+(`/space/{s}/`, `/space/{s}/{c}/`, `/spaces/`); the bare forms answer `308`
+to the canonical one.
+
+| Method | Path | Function | Operation |
 | --- | --- | --- | --- |
-| POST | `/spaces` | `SpacesRegistryFn` | [src/spaces/registry](src/spaces/registry/app.mjs) |
-| GET | `/spaces` | `SpacesRegistryFn` | [src/spaces/registry](src/spaces/registry/app.mjs) |
-| DELETE | `/space/{space_id}` | `SpaceDeleteFn` | [src/spaces/delete](src/spaces/delete/app.mjs) |
-| POST | `/space/{space_id}/` | `CollectionsCreateFn` | [src/collections/create](src/collections/create/app.mjs) |
-| GET | `/space/{space_id}` | `SpaceDescriptionGetFn` | [src/spaces/description/get](src/spaces/description/get/app.mjs) |
-| GET | `/space/{space_id}/collections` | `SpaceCollectionsListGetFn` | [src/spaces/get](src/spaces/get/app.mjs) |
-| GET | `/space/{space_id}/{collection_id}` | `CollectionsGetFn` | [src/collections/get](src/collections/get/app.mjs) |
-| PUT | `/space/{space_id}/{collection_id}` | `CollectionsPutFn` | [src/collections/put](src/collections/put/app.mjs) |
-| GET | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesGetFn` | [src/resources/get](src/resources/get/app.mjs) |
-| PUT | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesPutFn` | [src/resources/put](src/resources/put/app.mjs) |
-| DELETE | `/space/{space_id}/{collection_id}/{resource_id}` | `ResourcesDeleteFn` | [src/resources/delete](src/resources/delete/app.mjs) |
-| GET/PUT | `/space/{space_id}/{collection_id}/meta`, `.../{resource_id}/meta` | `MetaFn` | [src/meta](src/meta/app.mjs) |
-| GET/PUT/DELETE | `/space/{space_id}/policy`, `.../{collection_id}/policy`, `.../{resource_id}/policy` | `PoliciesFn` | [src/policies](src/policies/app.mjs) |
+| GET, HEAD | `/` | `ServiceGetFn` | the service description (discovery; no authorization) |
+| POST | `/spaces/` | `SpacesPostFn` | provision a Space (`{controller, name?, type?, coupon}`) |
+| GET | `/spaces/` | `SpacesGetFn` | list the caller's Spaces |
+| GET | `/space/{s}/` | `SpaceCollectionsGetFn` | list the Space's Collections |
+| POST | `/space/{s}/` | `CollectionCreateFn` | create a Collection (`{id?, name?, encryption?, ...}`) |
+| DELETE | `/space/{s}/` | `SpaceDeleteFn` | delete the Space (bucket + registry row) |
+| GET | `/space/{s}/meta` | `SpaceMetaGetFn` | Space Metadata |
+| PUT | `/space/{s}/meta` | `SpaceMetaPutFn` | replace it (`type` write-once; `controller` fixed) |
+| GET / PUT / DELETE | `/space/{s}/policy` | `SpacePolicy{Get,Put,Delete}Fn` | the Space's access-control policy |
+| GET | `/space/{s}/{c}/` | `ResourceGetFn` | list the Collection's Resources |
+| POST | `/space/{s}/{c}/` | `ResourceCreateFn` | create a Resource with a server-assigned id |
+| DELETE | `/space/{s}/{c}/` | `ResourceDeleteFn` | delete the Collection and everything in it |
+| GET | `/space/{s}/{c}/meta` | `CollectionMetaGetFn` | Collection Metadata (configuration + `custom`/`epoch`) |
+| PUT | `/space/{s}/{c}/meta` | `CollectionMetaPutFn` | replace it (`If-None-Match: *` creates) |
+| GET / PUT / DELETE | `/space/{s}/{c}/policy` | `CollectionPolicy{Get,Put,Delete}Fn` | the Collection's policy |
+| GET, HEAD | `/space/{s}/{c}/{r}` | `ResourceGetFn` | Resource content |
+| PUT | `/space/{s}/{c}/{r}` | `ResourcePutFn` | create or replace it |
+| DELETE | `/space/{s}/{c}/{r}` | `ResourceDeleteFn` | delete it (permanently) |
+| GET / PUT | `/space/{s}/{c}/{r}/meta` | `ResourceMeta{Get,Put}Fn` | Resource Metadata (derived fields + `custom`) |
+| GET / PUT / DELETE | `/space/{s}/{c}/{r}/policy` | `ResourcePolicy{Get,Put,Delete}Fn` | the Resource's policy |
+| anything else | | `DefaultFn` | `308` for the bare Space URL, `405` for reserved segments not implemented (`linkset`, `quotas`, `meta/log`, `chunks`, ...), else `404` |
 
-**Trailing slashes.** WAS list URLs end in a slash (`/space/{s}/collections/`
-lists a Space's Collections; `/space/{s}/{c}/` lists a Collection's members).
-A deployed HTTP API cannot route a trailing slash to its own route key — the
-empty last segment matches the resource route with an empty `resource_id` — so
-`ResourcesGetFn` dispatches an empty `resource_id` to the appropriate listing.
-(`sam local` collapses the trailing slash instead, where `CollectionsGetFn`'s
-own listing branch handles it.)
+**Trailing slashes.** The gateway matches `/space/{s}/` to the
+`/space/{space_id}/{collection_id}` route with an empty `collection_id`,
+and `/space/{s}/{c}/` to the `{resource_id}` route with an empty
+`resource_id`. So the Space container's three operations live on the
+`{collection_id}` route, and `ResourceGetFn` / `ResourceDeleteFn` serve the
+Collection container when the final segment is empty. Each such function
+has that one branch and nothing else.
 
-### `POST /spaces` and `GET /spaces`
+### Discovery
 
-Implements the spec's space provisioning and listing
-([http-api-post-spaces](https://w3c-ccg.github.io/wallet-attached-storage-spec/)).
-These routes have no space in their URL, so the standard authorizer cannot
-resolve a controller for them; the handler verifies the zcap invocation
-itself.
+Every response carries `Link: <{base}/>; rel="service"`. The document at
+the root lists the one specification version served (`0.5`), the Spaces
+Repository URL, and the feature tokens. A v0.5 client reads it before its
+first signed request and refuses a server without it.
 
-**POST /spaces** provisions a space. The body is
-`{controller, type, name?, coupon}`:
+### Spaces Repository
 
-- `controller` — the new space's controller DID. Per the spec, the request
-  must be authorized by this DID: the invocation signature is verified against
-  it. The server knows nothing about wallet accounts; registry rows are keyed
-  to the controller DID alone.
-- `coupon` — space creation is restricted: the coupon is redeemed from the
-  `was-coupons` table this stack owns. A coupon row may carry `usesRemaining`
-  (a number; absent means unlimited) and `expiresAt` (an ISO timestamp; absent
-  means never) — a finite coupon is decremented atomically on each redemption.
-  An unknown, expired, or spent coupon is a 403. The wallet deployment seeds
-  its registration code as an unlimited coupon; mint further rows directly:
+**POST /spaces/** provisions a Space. Per the spec the request must be
+authorized by the `controller` DID named in the body: the authorizer
+verifies the invocation against the DID that signed it, and the function
+requires that DID to be the stated controller. This server adds a `coupon`,
+redeemed from the `was-coupons` table (optional `usesRemaining` and
+`expiresAt`; an unknown, spent or expired coupon is a `403`). `type` is the
+Space's type array (default `["Space"]`; the wallet marks batch spaces
+`["Space", "BatchSpace"]`); `name` is kept in the Space Metadata and mirrored
+to the registry for listings. The server assigns the id (`dcc-was-{uuid}`,
+also the bucket name), creates the bucket with `meta/space.json`, registers
+the Space, and answers `201` with `Location` and the metadata. Mint coupons
+directly:
 
-  ```sh
-  aws dynamodb put-item --table-name was-coupons --item \
-    '{"coupon":{"S":"<secret>"},"usesRemaining":{"N":"5"},"expiresAt":{"S":"2027-01-01T00:00:00Z"},"createdAt":{"S":"2026-10-02T00:00:00Z"}}'
-  ```
-- `type` — `credential` or `batch`, recorded in the wallet-spaces registry.
-- `name` — seeds the space's description document.
-
-On success (201) the handler creates the space's bucket (`dcc-was-<uuid>`),
-seeds `metadata/description.json`, registers the space in the wallet-spaces
-registry, and returns `{space, type, name}`.
-
-**GET /spaces** lists the caller's registered spaces as
-`{spaces: [{url, type, createdAt}]}` — per the spec, the spaces the caller is
-authorized to access. The caller self-authenticates: the signer's DID is taken
-from the invocation's `keyId`, the invocation must verify against it, and the
-response is the spaces registered to that DID (the registry's `by-did` index).
-
-### `DELETE /space/{space_id}`
-
-Deletes a whole space: the bucket is emptied and removed, then the registry
-row. The standard authorizer verifies the invocation against the space's
-registered controller DID — the spec's rule that deletion requires a
-capability invoked by the controller. Only `batch` spaces may be deleted
-(403 otherwise).
-
-### `POST /space/{space_id}/`
-
-Creates a collection (the was-client's `createCollection`): the body carries
-the writable description fields and an optional `id`; without one the server
-generates a UUID. Responds **201** with the stored description (the client
-reads the `id` back) and a `Location` header. An existing collection is a
-**409** — this route is create-only, unlike the PUT route's update-or-create.
-Ids must be a single path segment, and `collections` and `policy` are reserved
-(they are the space's own sub-routes). A deployed HTTP API matches the
-trailing-slash path to the `{collection_id}` route with an empty final
-segment, so the function is registered on both forms and refuses a POST to a
-real collection path (405).
-
-### `GET /space/{space_id}`
-
-Implements [http-api-get-space-space_id](https://w3c-ccg.github.io/wallet-attached-storage-spec/#http-api-get-space-space_id).
-Returns the Space's description document. The handler reads
-`metadata/description.json` from the Space's bucket, then overlays the fields the
-server owns, so the response stays spec-shaped even if the stored document is
-partial:
-
-```json
-{
-  "id": "<space_id>",
-  "url": "/space/<space_id>",
-  "type": ["Space"],
-  "name": "Example space #1",
-  "controller": "did:key:z6Mk...",
-  "createdBy": "did:key:z6Mk...",
-  "linkset": "/space/<space_id>/linkset"
-}
+```sh
+aws dynamodb put-item --table-name was-coupons --item \
+  '{"coupon":{"S":"<secret>"},"usesRemaining":{"N":"5"},"expiresAt":{"S":"2027-01-01T00:00:00Z"}}'
 ```
 
-`name`, `controller`, `createdBy` and any other authored fields pass through from
-the stored document. `id`, `url`, `type` and `linkset` are always derived from
-the request path.
+**GET /spaces/** lists the Spaces registered to the DID that signed the
+request (the registry's `by-did` index), paged. An unsigned or unverifiable
+caller gets an empty list, never an error.
 
-### `GET /space/{space_id}/collections`
+### Status codes, validators, errors
 
-Lists the Collections in a Space, by listing the `collections/` prefix with
-`Delimiter: "/"` and reading `CommonPrefixes` — each sub-folder is one
-Collection.
+- Create: `201` with `Location` and `ETag`. Update: `204` (content) or `200`
+  with the stored object (metadata, policies). Delete: `204`. A resource read
+  carries `ETag` and `Last-Modified`; `If-None-Match` answers `304`.
+- `If-Match` and `If-None-Match: *` are honored on every write and delete
+  through S3's conditional operations, so the precondition is atomic with
+  the write; failure is `412`. Metadata objects are versioned by their own
+  ETag, independent of content.
+- Errors are RFC 9457 `application/problem+json` with the spec's
+  `https://w3id.org/pws#...` types (`not-found`, `invalid-id`, `reserved-id`,
+  `id-conflict`, `precondition-failed`, `invalid-request-body`,
+  `invalid-cursor`, `missing-content-type`, `missing-authorization`,
+  `invalid-authorization-header`, `controller-mismatch`,
+  `unsupported-operation`).
+- Listings are `{ url, totalItems, items, next? }` with `?cursor=` and
+  `?limit=` (default 100, max 1000); `next` is the absolute URL of the
+  following page. Resource listings page over S3; Collection and Space
+  listings page in memory.
 
-### `GET /space/{space_id}/{collection_id}`
+### Collections and Resources
 
-Behaviour depends on the trailing slash:
+A Collection comes into existence through `POST /space/{s}/` (create-only;
+a taken id is `409 id-conflict`), through `PUT .../meta` with
+`If-None-Match: *`, or implicitly on the first Resource write into it (the
+server then writes plaintext metadata for it). Content written straight into
+a bucket by another service (the issuer's `collections/{id}/bundle.json`)
+is also listed, and its `/meta` is synthesized, unversioned, until written.
 
-- **With** a trailing slash — lists the Collection's member resources, by listing
-  `collections/{collection_id}/` and reading `Contents`. Keys named in
-  `RESERVED_RESOURCE_IDS` (currently the folder marker and `description.json`)
-  are excluded, since they are not members of the Collection.
-- **Without** — returns the Collection's own
-  `collections/{collection_id}/description.json` verbatim.
+Resource content is stored exactly as sent, under the `Content-Type` the
+client gave (required). The content object carries the stamps Resource
+Metadata derives: creation time and author, the `Key-Epoch` and `Writer-Id`
+headers of the last write (an absent header clears the stamp). Binary
+content is served base64-encoded through the gateway. Deletion is
+permanent: the wallet keeps its own `Trash` collection.
 
-### `PUT /space/{space_id}/{collection_id}` and `PUT .../{resource_id}`
+### Authorization
 
-Upsert a Collection description or a member resource. Both return **201** with
-a `Location` header on create and **200** on update, always with a JSON body —
-API Gateway defaults the `Content-Type` to `application/json`, so an empty
-body breaks clients that trust the header.
+Verification and the decision are split between the authorizer and the
+functions, because a gateway denial is always a `403` and the spec's
+answers are different.
 
-### `DELETE /space/{space_id}/{collection_id}/{resource_id}`
+- **The authorizer** ([src/authorizer/](src/authorizer/), bundled with the
+  `@interop` verification stack) runs on every route except `/` and
+  `$default`. For a Space URL it reads the Space's controller DID from the
+  registry row for `{base}/space/{s}` and verifies the invocation against it
+  (every `urn:zcap:root:...` resolves to a root capability controlled by
+  that DID; a delegation chain may start from the invoked URL, the
+  Collection or the Space container). For `/spaces/` it verifies against the
+  DID that signed. The URL is checked as delivered and, when ids were
+  percent-encoded, re-encoded — API Gateway hands the path decoded. It
+  **never denies**: it answers `isAuthorized: true` with the result in the
+  context (`signed`, `verified`, `controller`, `delegated`, `spaceController`,
+  `spaceType`, or `space=missing`).
+- **Each function** turns that context into the spec's answer through the
+  shared `authorize()` ([layers/was-lib/.../auth.mjs](layers/was-lib/nodejs/node_modules/was-lib/auth.mjs)):
+  a verified invocation proceeds; the container rule (`DELETE /space/{s}/`,
+  `PUT /space/{s}/meta`, `DELETE /space/{s}/{c}/`, `PUT /space/{s}/{c}/meta`)
+  refuses a delegated capability; the `Digest` header a signed body carries is
+  recomputed over the received bytes (`400 invalid-authorization-header` on
+  mismatch — the authorizer never sees the body, so this is what binds the
+  signature to it); an unsigned `GET`/`HEAD` is allowed where a
+  `PublicCanRead` policy covers the target (the Resource's own policy, else
+  its Collection's, else the Space's; policies themselves are never public);
+  anything else is `404`, except a listing (`200`, no items) and an unsigned
+  write (`401 missing-authorization`).
 
-A soft delete: the object is copied into the Space's `Trash` collection and the
-original removed. Deleting a resource already in `Trash` removes it
-permanently. Responds 200 with a JSON body pointing at the trashed location.
+### Permissions
 
-### `{GET,PUT} .../meta` — user-writable metadata
+Each function's role carries only the actions and key prefixes its
+operation touches, so a defect is bounded by the function it is in:
 
-The `/meta` sub-resource at the collection and resource scopes carries the
-user-writable metadata: `custom` (`{name, tags}` in plaintext — or an opaque
-EDV envelope on an encrypted collection, with its `epoch` beside it) plus
-server-managed fields (`createdAt`/`updatedAt`, and a resource's derived
-`contentType` and `size`). PUT is a full replacement of the user-writable
-part. The metadata is versioned independently of the content: the stored
-document's ETag comes back on GET and PUT and is honored as
-`If-Match`/`If-None-Match` (412 on failure) through S3's conditional writes.
-Documents live under the bucket's `meta/` prefix, mirroring the path they
-describe, so they never appear in listings; `meta` is a reserved resource id,
-since the literal route shadows it.
+- read functions have `s3:GetObject` on their prefix and on `policies/*`
+  (the public-read cascade), nothing that writes or deletes;
+- write functions add `s3:PutObject` on their prefix, never `DeleteObject`;
+- delete functions add `s3:DeleteObject`, never `PutObject`;
+- only `SpacesPostFn` can create a bucket or write a registry row; only
+  `SpaceDeleteFn` can delete a bucket or a registry row; only
+  `SpaceMetaPutFn` can update a registry row;
+- `ServiceGetFn` and `DefaultFn` have no permissions and no authorizer.
 
-### `{GET,PUT,DELETE} .../policy` — access-control policies
-
-Policy sub-resources exist at all three scopes: the Space, a Collection, and a
-resource. A policy document is stored under the bucket's `policies/` prefix
-(mirroring the path it governs), so policies never appear in listings. PUT
-upserts the document, GET returns it, DELETE reverts the scope to
-capability-only access. The one policy the system acts on is `PublicCanRead`
-(what `@interop/was-client`'s `setPublic()` writes): it lets **unsigned GETs**
-read the covered scope — see Authorization below. The LCW front end uses a
-resource-scoped policy for its public share links, so a shared credential's
-collection and siblings stay private.
+The layer is code, not permissions: whatever a shared function tries, AWS
+checks against the role of the lambda it is running in.
 
 ## Storage layout
 
-**One S3 bucket per Space, named for the `space_id`.** The bucket *is* the Space,
-so keys are already rooted at the Space and contain no `/space/{space_id}`
-segment.
+One S3 bucket per Space, named for the space id.
 
 ```
 s3://{space_id}/
-├── metadata/
-│   └── description.json          <- the Space description
-├── policies/                     <- access-control policies, keyed by governed path
+├── meta/
+│   ├── space.json                Space Metadata
+│   ├── {collection_id}.json      Collection Metadata
 │   └── {collection_id}/
-│       └── {resource_id}.json    <- e.g. a resource-scoped PublicCanRead policy
+│       └── {resource_id}.json    Resource Metadata (the custom annotation)
+├── policies/
+│   ├── space.json
+│   ├── {collection_id}.json
+│   └── {collection_id}/{resource_id}.json
 └── collections/
-    ├── Trash/                    <- soft-deleted resources (created on first delete)
     └── {collection_id}/
-        ├── description.json      <- the Collection description
-        ├── {resource_id}         <- a member resource
-        └── {resource_id}
+        └── {resource_id}         Resource content
 ```
 
-## Authorization
-
-Every route on `WASApi` is protected by `WASZcapAuthorizer`, a Lambda **REQUEST**
-authorizer declared as the API's `DefaultAuthorizer`. Handlers do no verification
-of their own.
-
-The authorizer runs for **unsigned requests too** (it declares no
-`Authorization` identity source, which would make API Gateway answer 401
-before the authorizer could look). A request without authorization headers is
-allowed only as a **public read**: a GET of a space, collection, or resource
-covered by a `PublicCanRead` policy, cascading outward — the resource's own
-policy, else its collection's, else the space's
-([src/authorizer/publicRead.mjs](src/authorizer/publicRead.mjs)). Such
-requests get `context.controller = "public"`. Policy sub-resources themselves
-are never public, and unsigned writes are always denied.
-
-- [src/authorizer/app.mjs](src/authorizer/app.mjs) — the authorizer entry
-  point; returns an HTTP API *simple response* (`{ isAuthorized, context }`,
-  payload format 2.0).
-- [src/authorizer/zcap.mjs](src/authorizer/zcap.mjs) — `verifyZcap`, which wraps
-  `verifyCapabilityInvocation` from `@interop/http-signature-zcap-verify`.
-
-The **space's controller DID comes from the spaces registry** (the
-`wallet-spaces` DynamoDB table owned by the lcw-back-end stack, keyed by space
-URL with one row per space): `verifyZcap` takes everything in the request URL
-up to and including the `{space_id}` segment — which also matches the invoked
-zcap target — and reads that row with a keyed GetItem. The row's `did` controls
-the root capability, so only invocations signed by the registered key verify,
-and a space with no registry row is rejected outright.
-
-`verifyZcap(event)` derives everything else from the payload-v2 event:
-
-| `verifyCapabilityInvocation` argument | Derived from |
-| --- | --- |
-| `url`, `expectedTarget` | `x-forwarded-proto` + `host` header + `event.rawPath` |
-| `method`, `expectedAction` | `event.requestContext.http.method` |
-| `expectedHost` | `host` header |
-| `expectedRootCapability` | `urn:zcap:root:` + URI-encoded target |
-| `headers` | `event.headers`, with `authorization` normalized to lowercase |
-
-Header lookups are case-insensitive; the `$default` stage serves at the root,
-so `rawPath` is exactly the path the client signed.
-
-On success the authorizer answers `{ isAuthorized: true, context: {...} }`.
-HTTP APIs nest that context under `lambda`, so handlers read:
-
-```js
-const { controller, capability, capabilityAction } =
-  event.requestContext.authorizer.lambda;
-```
-
-Context values must be scalars — no nested objects or arrays — so the capability
-is passed as its id string.
-
-On failure the authorizer answers `{ isAuthorized: false }`, which API Gateway
-maps to a **403** (a missing `Authorization` header never reaches the
-authorizer: the gateway answers 401 itself, because the header is the declared
-identity source). The real verification error is logged, never returned.
-
-Deliberate settings in `template.yaml`:
-
-- **`ReauthorizeEvery: 0`** disables the authorizer result cache. Each zCap is
-  signed over its own request, so a cached decision would authorize a *different*
-  request than the one that was actually verified.
-- **`CorsConfiguration`** on the API handles the OPTIONS preflight and injects
-  the CORS headers into every response — including authorizer denials — with
-  nothing per handler. Preflights are never sent to the authorizer.
+The registry (`wallet-spaces`, owned by the lcw-back-end stack) has one row
+per Space: `spaceURL` (no trailing slash), `did`, `type` (a list), `name`,
+`CreatedAt`.
 
 ## Project layout
 
 ```
-src/
-├── authorizer/            zCap REQUEST authorizer (deps bundled, no layer)
-│   ├── app.mjs            simple-response construction
-│   ├── zcap.mjs           verifyZcap / verifyCapabilityInvocation
-│   └── package.json       @interop/* dependencies
-├── spaces/
-│   ├── registry/          POST /spaces + GET /spaces (deps bundled, in-handler zcap verify)
-│   ├── delete/            DELETE /space/{space_id}
-│   ├── description/get/   GET /space/{space_id}
-│   ├── description/put/   PUT /space/{space_id}
-│   └── get/               GET /space/{space_id}/collections
-├── collections/
-│   ├── get/               GET /space/{space_id}/{collection_id}
-│   └── put/               PUT /space/{space_id}/{collection_id}
-├── resources/
-│   ├── get/               GET /space/{space_id}/{collection_id}/{resource_id}
-│   │                      (also serves trailing-slash listings; see Endpoints)
-│   ├── put/               PUT /space/{space_id}/{collection_id}/{resource_id}
-│   └── delete/            DELETE /space/{space_id}/{collection_id}/{resource_id}
-└── sharedLayer/           dead code; commented out of template.yaml
-events/
-├── routes.mjs             shared route table + event scaffolding
-├── sign.mjs               prints a freshly-signed authorizer event to stdout
-├── generate.mjs           rewrites the static proxy fixtures
-├── check.mjs              signs fresh + runs the real authorizer (npm test)
-├── handlers.test.mjs      in-process route handler tests, S3 stubbed (npm test)
-└── *.json                 static, unsigned proxy events
-template.yaml              all AWS resources
-package.json               root test script + @aws-sdk/client-s3 devDependency
-                           (Lambda provides the SDK at runtime; handler tests
-                           resolve this local copy)
+layers/was-lib/nodejs/node_modules/was-lib/   the shared layer (plain ESM, no dependencies)
+├── handler.mjs      handler(operation, {scope, ...}): parse, resolve ids, authorize, run
+├── auth.mjs         the authorization decision from the authorizer's context; Digest check
+├── http.mjs         request parsing, responses, problem+json, the service link
+├── ids.mjs          reserved segments, id rules
+├── meta.mjs         reading and composing the metadata objects (used by several endpoints)
+├── policy.mjs       PublicCanRead evaluation
+├── problems.mjs     problem types
+├── store.mjs        S3 (conditional writes, listings)
+└── ops/             only what more than one endpoint runs: the policy operations
+                     (three lambdas each), the content write (put and create),
+                     pagination helpers
+                     Everything a single endpoint does -- the registry row writes,
+                     bucket creation and deletion, coupons, the annotation write --
+                     is in that endpoint's own file.
+src/authorizer/      the gateway authorizer (verification only; bundled)
+src/endpoints/       one directory per endpoint, grouped by what the route addresses;
+│                    each app.mjs is that endpoint's operation
+├── service/get
+├── spaces/          post, get
+├── space/           collections-get, collection-create, delete, meta-get, meta-put,
+│                    policy-get, policy-put, policy-delete
+├── collection/      meta-get, meta-put, policy-get, policy-put, policy-delete
+├── resource/        get, create, put, delete, meta-get, meta-put,
+│                    policy-get, policy-put, policy-delete
+└── default
+test/
+├── api.test.mjs     in-process tests (routing, authorizer and functions; AWS faked)
+├── routes.mjs       the gateway route table, matched the way the gateway matches
+├── fakes.mjs        in-memory S3 and DynamoDB
+├── harness.mjs      signed events, the way the client signs them
+└── live.mjs         conformance check through @interop/was-client against a deployment
+template.yaml        all AWS resources: the API, the authorizer, the layer, 27 functions
 ```
 
-### Build notes
-
-Only `WASZcapAuthorizerFn` has a `Metadata` block. It is the one function with
-third-party dependencies, so it is the only one that needs bundling:
-
-- **`BuildMethod: esbuild`** bundles its `@interop/*` dependencies into a single
-  ~1 MB `app.mjs`, since they are not available to the runtime any other way.
-- **`Banner`** injects `createRequire`, which is what lets those bundled CJS
-  dependencies work inside an ESM output.
-
-It also overrides the 3s `Globals` timeout to 10s, because a cold start does DID
-resolution and Ed25519 verification.
-
-The S3 handlers use SAM's default Node.js builder, which copies the source
-as-is. They import nothing but `@aws-sdk/client-s3`, which
-[every supported Node.js runtime provides](https://docs.aws.amazon.com/lambda/latest/dg/lambda-nodejs.html#nodejs-sdk-included),
-so there is nothing to bundle. `.mjs` files are treated as ESM by Node
-regardless of any build setting, and each handler directory carries a
-`package.json` with `"type": "module"` as well.
+Handlers import the layer as `was-lib/...`; in Lambda that resolves from
+`/opt/nodejs/node_modules`, locally from the root `package.json`'s `file:`
+link to the layer directory. The authorizer is bundled with esbuild (its
+`@interop/*` dependencies are not available to the runtime otherwise) and
+imports `@interop/http-client` first on purpose: a CJS dependency
+`require()`s that ESM package mid-graph and hits a TDZ error otherwise.
 
 ## Requirements
 
 * [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install.html)
-* [Docker](https://hub.docker.com/search/?type=edition&offering=community) (only for `--use-container` builds)
-* Node.js 24 (the Lambda runtime is `nodejs24.x`)
+* Node.js 24 (the Lambda runtime is `nodejs24.x`; the tests run on 22)
 
 ## Build and deploy
 
 ```bash
 sam build
-sam deploy --guided
+sam deploy
 ```
 
-Subsequent deploys are just `sam deploy`. Endpoint URLs are in the stack outputs.
+The stack's one parameter, `SpaceBaseUrl`, is the base of registered space
+URLs (`https://was.lcw-sandbox.org/space`). Keep it with
+`UsePreviousValue` when deploying a change set.
 
-To build one function at a time:
+## Tests
 
 ```bash
-sam build WASZcapAuthorizerFn
+npm install                       # links the layer for local resolution
+npm install --prefix src/authorizer
+npm install --prefix test
+npm test                          # test/api.test.mjs
 ```
 
-## Test locally
+[test/api.test.mjs](test/api.test.mjs) runs each request through the
+gateway's route table ([test/routes.mjs](test/routes.mjs)), the real
+authorizer, and the endpoint function it reaches, with S3 and DynamoDB
+faked ([test/fakes.mjs](test/fakes.mjs), including S3's conditional writes
+and paged listings). Every request is signed by
+[test/harness.mjs](test/harness.mjs) the way `@interop/was-client` signs it —
+an invocation of the request URL's root capability with a `Digest` over the
+body — and delivered the way API Gateway delivers it (path decoded, path
+parameters filled). It covers discovery, the repository, every endpoint's
+status codes and validators, pagination, encoded ids, policies and public
+reads, and the authorization answers (404, empty listings, 401).
 
 ```bash
-sam local start-api
-curl http://localhost:3000/space/{space_id}
+WAS_URL=https://was.lcw-sandbox.org COUPON=<coupon> npm run live
 ```
 
-The API runs on port 3000, which is why `localhost:3000` shows up as the expected
-host in signed test invocations. `sam local start-api` does invoke the Lambda
-authorizer, so local requests need a validly signed zCap too.
-
-A single function can be invoked directly with a test event, which bypasses the
-authorizer. See [Test events](#test-events) below for where those come from:
-
-```bash
-sam local invoke SpaceDescriptionGetFn --event events/space-description-get.json
-```
-
-## Test events
-
-`events/` handles the two event shapes differently, because only one of them
-needs a signature.
-
-```bash
-cd events && npm install
-```
-
-### Authorizer events — signed on demand
-
-`WASZcapAuthorizerFn` needs a valid signature, so its events are generated per
-invocation and never stored. [events/sign.mjs](events/sign.mjs) prints one to
-stdout, and `sam local invoke` reads an event from stdin with `-e -`:
-
-```bash
-node sign.mjs space-description-get | sam local invoke WASZcapAuthorizerFn -e -
-node sign.mjs space-description-get --invalid | sam local invoke WASZcapAuthorizerFn -e -
-```
-
-Routes: `space-description-get`, `space-collections-list-get`,
-`collection-list-get`, `collection-description-get`, `collection-put`,
-`resource-put`, `resource-get`, `resource-delete`. `--invalid` corrupts the
-signature to exercise the denial path. Diagnostics go to stderr, so the pipe
-stays clean.
-
-Signing on demand avoids the trap that static signed fixtures fall into: the
-signer sets `expires` to `created + 600` and the signature covers the
-`(expires)` pseudo-header, so a stored signed event stops verifying ten minutes
-after it is written. A fresh one is always inside that window.
-
-The authorizer resolves each space's controller DID from the wallet-spaces
-registry ([src/authorizer/zcap.mjs](src/authorizer/zcap.mjs)), and only an
-invocation signed by that DID verifies. `check.mjs` stubs the lookup so the
-test signing key is always the registered controller; to exercise a real
-deployment with `sign.mjs`, the space `SPACE_ID` must be registered with the
-DID the test seed derives. A signature also covers `(request-target)` and `host`, so it is
-bound to one route and one host — it is not reusable across paths. Routes with
-a body additionally get a signed `digest` header over the JSON payload.
-
-### Proxy events — static, unsigned
-
-| File | Route |
-| --- | --- |
-| `space-description-get.json` | `GET /space/{space_id}` |
-| `space-collections-list-get.json` | `GET /space/{space_id}/collections` |
-| `collection-list-get.json` | collection listing (trailing slash) |
-| `collection-description-get.json` | collection description (no trailing slash) |
-| `collection-put.json` | `PUT /space/{space_id}/{collection_id}` |
-| `resource-put.json` | `PUT /space/{space_id}/{collection_id}/{resource_id}` |
-| `resource-get.json` | `GET /space/{space_id}/{collection_id}/{resource_id}` |
-| `resource-delete.json` | `DELETE /space/{space_id}/{collection_id}/{resource_id}` |
-
-These are what a route handler sees, for invoking one directly:
-
-```bash
-sam local invoke SpaceDescriptionGetFn --event events/space-description-get.json
-```
-
-They carry no signature. The authorizer has already run by the time a handler is
-invoked and no handler reads the `Authorization` header, so a signature here
-would be decoration that goes stale. They do carry a filled-in
-`requestContext.authorizer` block, so handler code that reads the invoker finds
-something realistic.
-
-Rewrite them with `npm run generate` after changing a route or path.
-
-### Checking it all works
-
-```bash
-npm test        # from the repo root or from events/
-```
-
-Running it from the repo root needs a one-time `npm install` there too (it
-provides the `@aws-sdk/client-s3` the handler tests resolve).
-
-[events/check.mjs](events/check.mjs) signs a fresh invocation for each route and
-runs it through the real authorizer in process — no files, no Docker, no AWS
-(the registry lookup is stubbed to register the test key as the space's
-controller). It asserts that each route answers `{ isAuthorized: true }` with
-the controller and capability on the context, that a tampered signature answers
-`{ isAuthorized: false }` (a denial, which API Gateway maps to a 403 — never a
-thrown error, which would be a 500), and that the controller embedded in the
-static proxy fixtures still matches the key the signer derives, so a seed change
-cannot leave them quietly stale.
-
-[events/handlers.test.mjs](events/handlers.test.mjs) then runs every route
-handler in process on `node --test`, feeding it the same proxy events the
-fixtures are generated from and stubbing `S3Client.prototype.send` per test. It
-covers the happy paths (listings — including the trailing-slash dispatch
-through the resource handler — descriptions, resource reads) and the write
-semantics: 201-with-`Location` vs 200 on PUT, the soft delete into `Trash` and
-the permanent delete from it, `ETag` passthrough, base64 body decoding, the
-400s for malformed collection descriptions, the reserved `description.json`
-key, and the `NoSuchBucket`/`NoSuchKey` 404s.
-
-The signing key is a throwaway for a seed that is already public in this repo.
-Never point it at a real deployment.
+[test/live.mjs](test/live.mjs) is the conformance check against a
+deployment, through `@interop/was-client` itself: discovery, a scratch
+Space, Space and Collection metadata with compare-and-swap, an encrypted
+collection (`createCollection` + `ensureFirstEpoch`, `add`, `get`, encrypted
+`setName`), plaintext resources with validators, resource metadata,
+policies and public reads, listings, deletes. The Space it creates is
+deleted at the end. Run it after every deploy.
 
 ## Logs
 
 ```bash
-sam logs -n WASZcapAuthorizerFn --stack-name "YOUR_STACK_NAME" --tail
+sam logs -n WASZcapAuthorizerFn --stack-name was-server --tail
 ```
 
-When a request is denied (403), the authorizer's log group has the real
-verification error; the response body deliberately does not.
-
-## Cleanup
-
-```bash
-sam delete
-```
+A rejected invocation is logged by the authorizer with its reason; the
+response deliberately says only `404`.
 
 ## Known gaps
 
-- **`expectedHost` no longer constrains anything.** It is derived from the
-  request's own `Host` header, so the comparison is self-satisfying — though a
-  spoofed `Host` also changes the space URL the registry lookup matches
-  against, so it no longer widens access on its own. Restoring the guard needs
-  a server-controlled source: an environment variable, or
-  `event.requestContext.domainName`.
-- **`src/sharedLayer` is dead code.** `verifyZcap` moved into the authorizer and
-  nothing imports the layer any more, so `DCCSharedLayer` is commented out in
-  `template.yaml` along with every `Layers:` and `External:` reference to it. The
-  source is still on disk and still contains a stale duplicate of `verifyZcap`,
-  which will drift from the real one in `src/authorizer/zcap.mjs`.
-- **Listings are not paginated.** `ListObjectsV2` returns at most 1000 keys and
-  the handlers ignore `IsTruncated`, so larger Spaces and Collections silently
-  truncate.
-- **Query strings are not covered.** `event.path` omits the query string, so a
-  capability signed over a URL with query parameters will not match.
-- **No replay protection.** Nothing tracks invocation nonces, so a captured
-  signed request can be replayed until its `expires` passes — and the verifier
-  only checks `expires` when the header is present, so an invocation signed
-  without one is replayable indefinitely.
-- **`/space/{space_id}/linkset` is advertised but not implemented.** The Space
-  description returns a `linkset` URL; no route serves it.
-- **`S3ReadPolicy: BucketName: '*'`** grants read on every bucket in the account,
-  not just Space buckets.
+- **Delegated capabilities** verify in principle (chains rooted at the
+  invoked URL, its Collection or the Space) but are untested here, and the
+  delegation proof suite the client signs with (`eddsa-jcs-2022`) is not yet
+  configured on the verifier.
+- **No replay protection.** A captured signed request can be replayed until
+  its `expires` passes.
+- **`expectedHost` is the request's own `Host` header**, so it constrains
+  nothing by itself; the registry lookup keyed by host is what prevents a
+  spoofed host from widening access.
+- **Collection and Space listings are read whole** before paging; fine for
+  the number of collections a wallet holds, not for thousands.
+- **Resource listings `HEAD` each object** for its content type and stamps.
+- Optional profiles not implemented: chunked resources, quotas, backends,
+  linksets, query, export/import.
 
 ## Resources
 
 - [WAS specification](https://w3c-ccg.github.io/wallet-attached-storage-spec/)
+- [@interop/was-client](https://github.com/interop-alliance/was-client)
 - [AWS SAM developer guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html)
-- [HTTP API Lambda authorizers](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-lambda-authorizer.html)
