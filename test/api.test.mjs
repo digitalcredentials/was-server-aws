@@ -30,6 +30,9 @@ test("GET / serves the service description with the service link", async () => {
   const res = await invoke({ path: "/", signer: null });
   assert.equal(res.status, 200);
   assert.equal(res.headers.link, `<${BASE}/>; rel="service"`);
+  // The one read that may be cached without revalidation: the description
+  // sets its own short lifetime instead of the no-cache every other read gets
+  assert.equal(res.headers["cache-control"], "public, max-age=300");
   assert.equal(res.json.url, `${BASE}/`);
   const entry = res.json.specs["https://w3id.org/pws"][0];
   assert.equal(entry.version, "0.5");
@@ -161,6 +164,7 @@ test("GET /space/{s}/meta returns the Space Metadata with an ETag", async () => 
   const res = await invoke({ path: `/space/${SPACE}/meta` });
   assert.equal(res.status, 200);
   assert.ok(res.headers.etag);
+  assert.equal(res.headers["cache-control"], "no-cache");
   assert.equal(res.json.id, SPACE);
   assert.equal(res.json.url, SPACE_URL);
   assert.equal(res.json.controller, controllerKey.controller);
@@ -369,10 +373,14 @@ test("PUT creates then updates a Resource with validators and the spec's status 
   assert.equal(read.headers.etag, updated.headers.etag);
   assert.equal(read.headers["content-type"], "application/json");
   assert.ok(read.headers["last-modified"]);
+  // A read with Last-Modified and no Cache-Control would be heuristically
+  // cached by browsers; the server requires revalidation instead
+  assert.equal(read.headers["cache-control"], "no-cache");
 
   const cached = await invoke({ path: `/space/${SPACE}/docs/one`, headers: { "if-none-match": updated.headers.etag } });
   assert.equal(cached.status, 304);
   assert.equal(cached.body, "");
+  assert.equal(cached.headers["cache-control"], "no-cache");
 
   const head = await invoke({ method: "HEAD", path: `/space/${SPACE}/docs/one` });
   assert.equal(head.status, 200);

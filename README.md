@@ -83,7 +83,11 @@ caller gets an empty list, never an error.
 
 - Create: `201` with `Location` and `ETag`. Update: `204` (content) or `200`
   with the stored object (metadata, policies). Delete: `204`. A resource read
-  carries `ETag` and `Last-Modified`; `If-None-Match` answers `304`.
+  carries `ETag` and `Last-Modified`; `If-None-Match` answers `304`. Every
+  GET and HEAD answer carries `Cache-Control: no-cache` (the service
+  description, which sets a short `max-age` of its own, is the exception),
+  so a browser revalidates a cached read instead of applying heuristic
+  freshness to a document that may have been rewritten since.
 - `If-Match` and `If-None-Match: *` are honored on every write and delete
   through S3's conditional operations, so the precondition is atomic with
   the write; failure is `412`. Metadata objects are versioned by their own
