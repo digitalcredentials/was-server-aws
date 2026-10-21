@@ -380,6 +380,20 @@ Resources:
             ApiId: !Ref WASHttpApi
             Path: /spaces/{p}
             Method: get
+        # was-client 0.96+ is built with the Spaces Repository URL and probes
+        # it with a HEAD for the service link before its first request.
+        Head:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /spaces
+            Method: head
+        HeadSlash:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /spaces/{p}
+            Method: head
 
   # GET /space/{s}/ -- the Space's Collections. The gateway delivers the
   # trailing-slash container URL to the {collection_id} route with an empty

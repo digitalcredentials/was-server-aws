@@ -145,6 +145,16 @@ test("GET /spaces/ lists the signer's Spaces and pages them", async () => {
   assert.notEqual(first.json.items[0].id, second.json.items[0].id);
 });
 
+test("HEAD /spaces/ carries the service link, signed or not", async () => {
+  const unsigned = await invoke({ method: "HEAD", path: "/spaces/", signer: null });
+  assert.equal(unsigned.status, 200);
+  assert.equal(unsigned.headers.link, `<${BASE}/>; rel="service"`);
+  assert.equal(unsigned.body, "");
+  const signed = await invoke({ method: "HEAD", path: "/spaces/" });
+  assert.equal(signed.status, 200);
+  assert.equal(signed.headers.link, `<${BASE}/>; rel="service"`);
+});
+
 test("GET /spaces/ answers an empty list to an unsigned or badly signed caller", async () => {
   const unsigned = await invoke({ path: "/spaces/", signer: null });
   assert.equal(unsigned.status, 200);
