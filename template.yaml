@@ -8,6 +8,13 @@ Parameters:
   SpaceBaseUrl:
     Type: String
     Default: https://was.lcw-sandbox.org/space
+  # The identity domain did:webvh DIDs of this deployment's accounts name
+  # (did:webvh:{scid}:{IdDomain}:{spaceId}). A log at that location is the
+  # `id/did.jsonl` resource of the named Space, read from its bucket; any
+  # other did:webvh is fetched over HTTPS.
+  IdDomain:
+    Type: String
+    Default: id.lcw-sandbox.org
 
 Globals:
   Function:
@@ -23,6 +30,7 @@ Globals:
         SPACES_TABLE_NAME: wallet-spaces
         COUPONS_TABLE_NAME: was-coupons
         SPACE_URL_BASE: !Ref SpaceBaseUrl
+        ID_DOMAIN: !Ref IdDomain
         INSTANCE_VERSION: '0.5.0'
 
 Resources:
@@ -112,11 +120,27 @@ Resources:
     Properties:
       CodeUri: src/authorizer
       Handler: app.lambdaHandler
-      # The verification stack is bundled; the shared layer is not needed.
-      Layers: []
+      # Resolving a did:webvh controller means reading and verifying its
+      # log, which a signed request can make the authorizer do once per
+      # cache lifetime.
+      Timeout: 10
       Policies:
         - DynamoDBReadPolicy:
             TableName: wallet-spaces
+        - Statement:
+            # The DID logs of this deployment's accounts, read from their
+            # Spaces' buckets (ListBucket on the one key so a missing log is
+            # a 404 rather than a 403).
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - collections/id/did.jsonl
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/collections/id/did.jsonl
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -124,8 +148,11 @@ Resources:
         Target: "es2022"
         Format: "esm"
         Platform: "node"
+        # The verification stack is bundled; the shared layer and the SDK
+        # are provided at run time.
         External:
           - "@aws-sdk/*"
+          - "was-lib/*"
         OutExtension:
           - .js=.mjs
         EntryPoints:
@@ -356,11 +383,14 @@ Resources:
     Properties:
       CodeUri: src/endpoints/space/meta-put
       Handler: app.lambdaHandler
+      # Promoting a controller resolves the did:webvh's log.
+      Timeout: 10
       Policies:
         - Statement:
             # Without ListBucket, S3 answers a HEAD/GET of a missing key with
             # 403 rather than 404; the prefix condition keeps it to this
-            # function's own keys.
+            # function's own keys (the metadata object, and the DID log a
+            # promotion resolves).
             - Effect: Allow
               Action: s3:ListBucket
               Resource: arn:aws:s3:::dcc-was-*
@@ -368,15 +398,26 @@ Resources:
                 StringLike:
                   s3:prefix:
                   - meta/space.json
+                  - collections/id/did.jsonl
         - Statement:
+            # UpdateItem mirrors the name and records a promoted controller;
+            # PutItem and CreateBucket provision an unlock Space.
             - Effect: Allow
-              Action: dynamodb:UpdateItem
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:PutItem
               Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/wallet-spaces
+            - Effect: Allow
+              Action: s3:CreateBucket
+              Resource: arn:aws:s3:::dcc-was-*
             - Effect: Allow
               Action:
                 - s3:GetObject
                 - s3:PutObject
               Resource: arn:aws:s3:::dcc-was-*/meta/space.json
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/collections/id/did.jsonl
       Events:
         Put:
           Type: HttpApi
@@ -384,6 +425,24 @@ Resources:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/meta
             Method: put
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2022"
+        Format: "esm"
+        Platform: "node"
+        # The did:webvh driver is bundled; the shared layer and the SDK are
+        # provided at run time.
+        External:
+          - "@aws-sdk/*"
+          - "was-lib/*"
+        OutExtension:
+          - .js=.mjs
+        EntryPoints:
+          - app.mjs
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
 
   # /space/{s}/policy
   SpacePolicyGetFn:

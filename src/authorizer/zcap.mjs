@@ -1,14 +1,23 @@
-import { securityLoader } from "@interop/security-document-loader";
+import { securityLoader, createDefaultDidResolver } from "@interop/security-document-loader";
 import { verifyCapabilityInvocation } from "@interop/http-signature-zcap-verify";
 import * as didKey from "@interop/did-method-key";
 import { Ed25519VerificationKey } from "@interop/ed25519-verification-key";
 import { Ed25519Signature2020 } from "@interop/ed25519-signature";
+import * as webvhDriver from "@interop/did-method-webvh";
+import { isWebvhDid, resolveWebvhDocument, verificationMethodFor } from "was-lib/webvh.mjs";
 
 // Capability-invocation verification. A request is authorized by a zcap
 // invocation signed by `controller`: every urn:zcap:root:{url} resolves to
 // a root capability controlled by that DID, so verification itself rejects
 // anything signed by another key, and a delegation chain must start from
 // the invoked URL's root or one of the container roots passed in.
+//
+// Two kinds of signing key. A did:key names its own key. A did:webvh key id
+// (<did>#<fragment>) names a verification method in the account document
+// the DID's log resolves to right now; the key must be listed there under
+// capabilityInvocation (or capabilityDelegation, for a delegation's proof),
+// and the method's controller is the did:webvh, which is what the root
+// capability's controller is compared against.
 
 const didKeyDriver = didKey.driver();
 didKeyDriver.use({
@@ -16,9 +25,68 @@ didKeyDriver.use({
   fromMultibase: Ed25519VerificationKey.from,
 });
 
-const baseDocumentLoader = securityLoader();
+const RELATIONS = ["authentication", "assertionMethod", "keyAgreement", "capabilityInvocation", "capabilityDelegation"];
+
+// A did:webvh document writes relationship entries as `#fragment`, relative
+// to its own id; the zcap library compares them to the absolute id of the
+// signing key, so they are absolutized here.
+function absoluteIds(doc) {
+  const absolute = (id) => (typeof id === "string" && id.startsWith("#") ? `${doc.id}${id}` : id);
+  const out = { ...doc };
+  for (const relation of RELATIONS) {
+    if (Array.isArray(doc[relation])) {
+      out[relation] = doc[relation].map((entry) =>
+        typeof entry === "string" ? absolute(entry) : { ...entry, id: absolute(entry?.id) }
+      );
+    }
+  }
+  if (Array.isArray(doc.verificationMethod)) {
+    out.verificationMethod = doc.verificationMethod.map((method) => ({ ...method, id: absolute(method?.id) }));
+  }
+  return out;
+}
+
+// The did:webvh document, or the one verification method a key URL names.
+async function resolveWebvh(id) {
+  const [did, fragment] = id.split("#");
+  const doc = await resolveWebvhDocument(did, { driver: webvhDriver });
+  if (!doc) {
+    throw new Error(`No DID log found for ${did}.`);
+  }
+  if (fragment === undefined) {
+    return absoluteIds(doc);
+  }
+  const method =
+    verificationMethodFor(doc, id, "capabilityInvocation") ??
+    verificationMethodFor(doc, id, "capabilityDelegation");
+  if (!method || !method.publicKeyMultibase) {
+    throw new Error(`${id} is not a capability key of ${did}.`);
+  }
+  return {
+    "@context": "https://w3id.org/security/multikey/v1",
+    ...method,
+    id,
+    type: "Multikey",
+    controller: method.controller ?? did,
+  };
+}
+
+// The document loader resolves the controller DID behind a capability as
+// well as the signing key, so did:webvh joins did:key and did:web there.
+const didResolver = createDefaultDidResolver();
+didResolver.use({ method: "webvh", get: ({ did, url }) => resolveWebvh(did ?? url) });
+const baseDocumentLoader = securityLoader({ didResolver });
+
+async function webvhVerifier(keyId) {
+  const verificationMethod = await resolveWebvh(keyId);
+  const key = await Ed25519VerificationKey.from(verificationMethod);
+  return { verifier: key.verifier(), verificationMethod };
+}
 
 async function getVerifier({ keyId }) {
+  if (isWebvhDid(keyId)) {
+    return webvhVerifier(keyId);
+  }
   const didDocument = await didKeyDriver.get({ url: keyId });
   const key = await Ed25519VerificationKey.from(didDocument);
   return { verifier: key.verifier(), verificationMethod: didDocument };
@@ -85,8 +153,12 @@ export async function verifyInvocation({ method, host, headers }, { controller, 
   return null;
 }
 
-// The signer's DID from the HTTP signature's keyId (did:key:z6Mk...#z6Mk...).
+// The signer's DID from the HTTP signature's keyId: did:key:z6Mk...#z6Mk...
+// or did:webvh:...#fragment.
 export function signerDid(authorization) {
   const keyId = authorization?.match(/keyId="([^"]+)"/)?.[1];
-  return keyId?.startsWith("did:key:") ? keyId.split("#")[0] : undefined;
+  if (!keyId) {
+    return undefined;
+  }
+  return keyId.startsWith("did:key:") || isWebvhDid(keyId) ? keyId.split("#")[0] : undefined;
 }

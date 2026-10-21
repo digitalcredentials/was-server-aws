@@ -3,3 +3,4 @@ process.env.SPACE_URL_BASE = "http://localhost:3000/space";
 process.env.SPACES_TABLE_NAME = "wallet-spaces";
 process.env.COUPONS_TABLE_NAME = "was-coupons";
 process.env.INSTANCE_VERSION = "test";
+process.env.ID_DOMAIN = "id.test";

@@ -209,11 +209,19 @@ export class FakeDynamo {
           item.usesRemaining = { N: String(remaining - 1) };
           return {};
         }
+        // SET a = :a, b = :b / REMOVE a, b, with #names resolved through
+        // ExpressionAttributeNames.
         const next = { ...(item ?? { spaceURL: { S: key } }) };
-        if (input.UpdateExpression.startsWith("REMOVE")) {
-          delete next.name;
-        } else {
-          next.name = input.ExpressionAttributeValues[":name"];
+        const names = input.ExpressionAttributeNames ?? {};
+        const attr = (token) => names[token] ?? token;
+        const [verb, rest] = input.UpdateExpression.split(/\s+(.*)/s);
+        for (const clause of rest.split(",").map((c) => c.trim())) {
+          if (verb === "REMOVE") {
+            delete next[attr(clause)];
+          } else {
+            const [lhs, rhs] = clause.split("=").map((c) => c.trim());
+            next[attr(lhs)] = input.ExpressionAttributeValues[rhs];
+          }
         }
         table.set(key, next);
         return {};

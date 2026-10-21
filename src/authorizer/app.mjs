@@ -4,6 +4,7 @@
 import "@interop/http-client";
 
 import { DynamoDBClient, GetItemCommand } from "@aws-sdk/client-dynamodb";
+import { deriveSpaceId } from "was-lib/webvh.mjs";
 import { verifyInvocation, signerDid, rootCapabilityId } from "./zcap.mjs";
 
 // The HTTP API's REQUEST authorizer (payload v2, simple responses): it
@@ -18,14 +19,17 @@ import { verifyInvocation, signerDid, rootCapabilityId } from "./zcap.mjs";
 //   controller       the verified signer's DID (the invoker)
 //   delegated        "true" when a delegated capability was invoked
 //   space            "missing" when the URL names a Space the registry
-//                    does not hold
+//                    does not hold; "unregistered" when it does not hold
+//                    it but the id is derived from the signing DID (an
+//                    unlock Space about to be provisioned)
 //   spaceController  the Space's registered controller DID
 //   spaceType        the Space's type array, as JSON
 //
 // For a Space URL the invocation is verified against the Space's registered
-// controller; for the Spaces Repository (no Space in the URL) against the
-// DID that signed it, which the POST handler then compares to the stated
-// controller.
+// controller; for the Spaces Repository (no Space in the URL), and for an
+// unregistered Space whose id the signer derived from its own DID, against
+// the DID that signed it, which the handler then compares to the stated
+// controller. The controller may be a did:key or a did:webvh (zcap.mjs).
 
 const dynamo = new DynamoDBClient({});
 const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "wallet-spaces";
@@ -101,7 +105,20 @@ export const lambdaHandler = async (event) => {
   } else if (ids[0] === "space" && ids[1]) {
     const space = await getSpace(`${base}/space/${ids[1]}`);
     if (!space) {
-      context.space = "missing";
+      const signer = authorization ? signerDid(authorization) : undefined;
+      if (signer && ids[1] === deriveSpaceId(signer)) {
+        context.space = "unregistered";
+        context.spaceController = signer;
+        context.spaceType = JSON.stringify(["Space"]);
+        const result = await verifyInvocation(request, { controller: signer, urls });
+        if (result) {
+          context.verified = "true";
+          context.controller = result.controller;
+          context.delegated = String(result.delegated);
+        }
+      } else {
+        context.space = "missing";
+      }
     } else {
       context.spaceController = space.controller;
       context.spaceType = JSON.stringify(space.type);

@@ -6,6 +6,9 @@
 import "./env.mjs";
 import { signCapabilityInvocation } from "@interop/http-signature-zcap-invoke";
 import { Ed25519VerificationKey } from "@interop/ed25519-verification-key";
+import { createDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
+import { bucketOf } from "was-lib/store.mjs";
+import { clearWebvhCache } from "was-lib/webvh.mjs";
 
 import { lambdaHandler as authorizer } from "../src/authorizer/app.mjs";
 import { matchRoute, GATEWAY_404 } from "./routes.mjs";
@@ -190,3 +193,45 @@ export async function seedObject(fakes, spaceId, key, body, contentType = "appli
     },
   });
 }
+
+// --- did:webvh ----------------------------------------------------------------
+
+// A signer over `key` whose id names the key's verification method in a
+// did:webvh document (<did>#<multibase>), for `invoke({ signer })`.
+export function asWebvh(key, did) {
+  const inner = key.signer();
+  return {
+    controller: did,
+    signer: () => ({ id: `${did}#${key.fingerprint()}`, algorithm: inner.algorithm, sign: inner.sign.bind(inner) }),
+  };
+}
+
+// Mints a did:webvh whose document lists `key` under every relationship, with
+// the log at {domain}/{path}. `keys` may add further Multikeys to the document.
+export async function mintWebvh({ key = controllerKey, domain = "id.test", path, keys = [] }) {
+  const multibase = key.fingerprint();
+  const members = [key, ...keys].map((k) => k.fingerprint());
+  const { did, doc, log } = await createDID({
+    address: domain,
+    paths: [path],
+    signer: signerFromDidKeySigner(key.signer()),
+    updateKeys: [`did:key:${multibase}`],
+    verificationMethods: members.map((publicKeyMultibase) => ({ type: "Multikey", publicKeyMultibase })),
+    vmIdFragment: "multibase",
+    portable: true,
+    authentication: members.map((m) => `#${m}`),
+    assertionMethod: members.map((m) => `#${m}`),
+    capabilityInvocation: members.map((m) => `#${m}`),
+    capabilityDelegation: members.map((m) => `#${m}`),
+  });
+  return { did, doc, log, jsonl: logToJsonlString(log), keyId: `${did}#${multibase}` };
+}
+
+// Publishes a log into a Space's `id` collection, where the server reads the
+// logs of its own identity domain from.
+export async function seedWebvhLog(fakes, spaceId, jsonl) {
+  clearWebvhCache();
+  await seedObject(fakes, bucketOf(spaceId), "collections/id/did.jsonl", jsonl, "text/jsonl");
+}
+
+export { bucketOf, clearWebvhCache };

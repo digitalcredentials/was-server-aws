@@ -10,7 +10,8 @@
   },
   "devDependencies": {
     "@aws-sdk/client-dynamodb": "^3.1145.0",
-    "@aws-sdk/client-s3": "^3.600.0"
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@interop/did-method-webvh": "^5.15.0"
   },
   "dependencies": {
     "was-lib": "file:layers/was-lib/nodejs/node_modules/was-lib"
