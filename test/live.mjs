@@ -17,10 +17,15 @@ import { ZcapClient } from "@interop/ezcap";
 import { WasClient, discoverService } from "@interop/was-client";
 import { createEdvEncryption, ensureFirstEpoch, ownerRecipient } from "@interop/was-client/edv";
 import { X25519KeyAgreementKey2020 } from "@interop/x25519-key-agreement-key";
+import { createDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
+import { createHash, randomBytes } from "node:crypto";
 
 const WAS = (process.env.WAS_URL ?? "https://was.lcw-sandbox.org").replace(/\/+$/, "");
 const COUPON = process.env.COUPON;
 const SEED = process.env.SEED ?? "live-conformance-seed-0000000000";
+// The identity domain the deployment resolves its own accounts' logs under
+// (the stack's IdDomain parameter).
+const ID_DOMAIN = process.env.ID_DOMAIN ?? "id.lcw-sandbox.org";
 
 if (!COUPON) {
   console.error("Set COUPON to a valid space-creation coupon.");
@@ -74,6 +79,9 @@ console.log(`     scratch space ${spaceId}`);
 
 const was = await WasClient.fromSigner({ serverUrl: WAS, signer: edKey.signer(), encryption });
 const space = was.space(spaceId);
+// Whichever client controls the scratch Space at teardown (the promotion
+// below moves control to the did:webvh client).
+let owner = space;
 
 try {
   // --- space metadata ---------------------------------------------------------
@@ -129,11 +137,57 @@ try {
   await notes.delete();
   check("collection.delete() removes the collection", (await notes.describe()) === null);
   check("meta of a missing resource is null", (await notes.resource("absent.json").meta()) === null);
+
+  // --- did:webvh: publish the account log into `id`, promote, sign as the
+  // account, provision an unlock Space ------------------------------------
+  const multibase = edKey.fingerprint();
+  const relation = [`#${multibase}`];
+  const minted = await createDID({
+    address: ID_DOMAIN,
+    paths: [spaceId],
+    signer: signerFromDidKeySigner(edKey.signer()),
+    updateKeys: [`did:key:${multibase}`],
+    verificationMethods: [{ type: "Multikey", publicKeyMultibase: multibase }],
+    vmIdFragment: "multibase",
+    portable: true,
+    authentication: relation,
+    assertionMethod: relation,
+    capabilityInvocation: relation,
+    capabilityDelegation: relation,
+  });
+  const log = await space.collection("id").resource("did.jsonl").put(new TextEncoder().encode(logToJsonlString(minted.log)), { contentType: "text/jsonl" });
+  check("did.jsonl published into the id collection", Boolean(log.etag));
+  const promoted = await space.configure({ name: "live check (renamed)", controller: minted.did });
+  check("space.configure() promotes the controller to the did:webvh", promoted.description.controller === minted.did, promoted.description.controller);
+  check("the did:key no longer reads the promoted Space", (await space.describe()) === null);
+  const inner = edKey.signer();
+  const accountSigner = { id: `${minted.did}#${multibase}`, algorithm: inner.algorithm, sign: inner.sign.bind(inner) };
+  const asAccount = await WasClient.fromSigner({ serverUrl: WAS, signer: accountSigner, encryption });
+  owner = asAccount.space(spaceId);
+  const accountView = await owner.describe();
+  check("the account's key reads the promoted Space", accountView?.controller === minted.did);
+  const asAccountWrite = await owner.collection("notes2").resource("after.json").put(new TextEncoder().encode('{"after":true}'), { contentType: "application/json" });
+  check("the account's key writes to the promoted Space", Boolean(asAccountWrite.etag));
+  const spacesAsAccount = await asAccount.listSpaces();
+  check("listSpaces() under the did:webvh lists the promoted Space", spacesAsAccount.items.some((item) => item.id === spaceId));
+
+  const unlockKey = await Ed25519VerificationKey.generate({ seed: new Uint8Array(randomBytes(32)) });
+  unlockKey.controller = `did:key:${unlockKey.fingerprint()}`;
+  unlockKey.id = `${unlockKey.controller}#${unlockKey.fingerprint()}`;
+  const unlockId = createHash("sha256").update(unlockKey.controller, "utf8").digest("base64url");
+  const asUnlock = await WasClient.fromSigner({ serverUrl: WAS, signer: unlockKey.signer() });
+  const unlock = asUnlock.space(unlockId);
+  const made = await unlock.configure({ name: "Unlock", controller: unlockKey.controller, type: ["AuxiliarySpace", "Space", "UnlockSpace"], force: true });
+  check("configure() on a derived id provisions an unlock Space", made.description.controller === unlockKey.controller && made.description.type.includes("UnlockSpace"), JSON.stringify(made.description.type));
+  const record = await unlock.collection("keyring").resource("keyring.json").put(new TextEncoder().encode('{"wrapped":"..."}'), { contentType: "application/json" });
+  check("the unlock Space takes a record", Boolean(record.etag));
+  const unlockGone = await unlock.deleteWithOutcome();
+  check("the unlock Space deletes", unlockGone.outcome === "deleted");
 } catch (err) {
   console.error("FAIL with error:", err);
   failures++;
 } finally {
-  const outcome = await space.deleteWithOutcome().catch((err) => ({ outcome: err.message }));
+  const outcome = await owner.deleteWithOutcome().catch((err) => ({ outcome: err.message }));
   check(`scratch space deleted (${outcome.outcome})`, outcome.outcome === "deleted");
 }
 process.exit(failures ? 1 : 0);

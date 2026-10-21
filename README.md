@@ -79,6 +79,44 @@ aws dynamodb put-item --table-name was-coupons --item \
 request (the registry's `by-did` index), paged. An unsigned or unverifiable
 caller gets an empty list, never an error.
 
+### did:webvh controllers
+
+A Space's controller may be a `did:webvh` as well as a `did:key`. The
+authorizer resolves the DID's log (`did.jsonl`) to the account document as
+it stands now and authorizes against it: a request signed with a key id of
+the form `<did:webvh>#<multibase>` verifies only if that method is listed
+under `capabilityInvocation` (or `capabilityDelegation`, for a delegation's
+proof) in the current document, whose `controller` is then the invoker the
+root capability is checked against. Revoking a key is one log entry. The
+resolved document is cached for `WEBVH_CACHE_SECONDS` (default 30), which
+is the window a revoked key keeps working.
+
+Where a log comes from (`was-lib/webvh.mjs`): a DID whose domain is the
+deployment's `IdDomain` parameter (default `id.lcw-sandbox.org`) and whose
+single path segment is a Space id names the log published in that Space's
+`id` collection (`collections/id/did.jsonl`), read from the bucket, so a
+freshly published log is seen at once and no public-read policy is
+involved. Any other `did:webvh` is fetched over HTTPS from the location the
+DID encodes, with a timeout (`WEBVH_FETCH_TIMEOUT_MS`, 3000) and a size cap
+(`WEBVH_MAX_LOG_BYTES`, 1 MiB). One verifier, two fetchers.
+
+Two operations exist for a wallet to move an account onto a `did:webvh`
+(the FreeWallet model):
+
+- **Promotion.** `PUT /space/{s}/meta` with a `did:webvh` as `controller`,
+  on a Space whose controller is a `did:key`, is accepted when the DID's
+  current document lists the invoking key under `capabilityInvocation`; the
+  registry row follows. From then on only keys in that document invoke. Any
+  other controller change is refused (`controller-mismatch`).
+- **Unlock Spaces.** `PUT /space/{id}/meta` on a Space the registry does not
+  hold provisions it, without a coupon, when `id` is was-client's
+  `deriveSpaceId` over the signing `did:key` (the unpadded base64url of its
+  SHA-256), the body names that `did:key` as `controller`, and its `type`
+  carries `UnlockSpace`. The id is bound to the key, so nothing else can be
+  claimed. Such an id is not a valid bucket name, so `bucketOf` in
+  `store.mjs` maps it to `dcc-was-` plus 40 hex characters of its SHA-256;
+  server-assigned ids are their own bucket names.
+
 ### Status codes, validators, errors
 
 - Create: `201` with `Location` and `ETag`. Update: `204` (content) or `200`

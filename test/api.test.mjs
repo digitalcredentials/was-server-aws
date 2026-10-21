@@ -8,7 +8,8 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { installFakes } from "./fakes.mjs";
-import { invoke, seedSpace, seedObject, controllerKey, strangerKey, BASE } from "./harness.mjs";
+import { invoke, seedSpace, seedObject, controllerKey, strangerKey, BASE, asWebvh, mintWebvh, seedWebvhLog, bucketOf, clearWebvhCache } from "./harness.mjs";
+import { deriveSpaceId } from "was-lib/webvh.mjs";
 
 const SPACE = "dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c";
 const SPACE_URL = `${BASE}/space/${SPACE}/`;
@@ -17,6 +18,7 @@ const PROBLEM = "application/problem+json";
 let fakes;
 beforeEach(async () => {
   fakes = installFakes();
+  clearWebvhCache();
   await seedSpace(fakes, { spaceId: SPACE });
   fakes.dynamo.tables["was-coupons"].set("open-sesame", { coupon: { S: "open-sesame" } });
   fakes.dynamo.tables["was-coupons"].set("one-shot", { coupon: { S: "one-shot" }, usesRemaining: { N: "1" } });
@@ -567,4 +569,192 @@ test("DELETE /space/{s}/ removes the bucket and the registry row", async () => {
   assert.equal(fakes.dynamo.tables["wallet-spaces"].has(`${BASE}/space/${SPACE}`), false);
   const after = await invoke({ path: `/space/${SPACE}/meta` });
   assert.equal(after.status, 404);
+});
+
+// --- did:webvh controllers ---------------------------------------------------
+
+const ACCOUNT = "dcc-was-0000aaaa-0000-4000-8000-0000000000ab";
+
+test("a did:webvh-controlled Space authorizes the keys its current document lists", async () => {
+  const account = await mintWebvh({ path: ACCOUNT });
+  await seedSpace(fakes, { spaceId: ACCOUNT, controller: account.did });
+  await seedWebvhLog(fakes, ACCOUNT, account.jsonl);
+
+  // The key, signing as its verification method in the document
+  const ok = await invoke({ path: `/space/${ACCOUNT}/meta`, signer: asWebvh(controllerKey, account.did) });
+  assert.equal(ok.status, 200, JSON.stringify(ok.json));
+  assert.equal(ok.json.controller, account.did);
+
+  // The same key under its did:key name is not the controller
+  const asKey = await invoke({ path: `/space/${ACCOUNT}/meta`, signer: controllerKey });
+  assert.equal(asKey.status, 404);
+
+  // A key the document does not list, signing under the account's name
+  const stranger = await invoke({ path: `/space/${ACCOUNT}/meta`, signer: asWebvh(strangerKey, account.did) });
+  assert.equal(stranger.status, 404);
+
+  // Writes work the same way
+  const put = await invoke({
+    method: "PUT",
+    path: `/space/${ACCOUNT}/notes/one`,
+    json: { v: 1 },
+    signer: asWebvh(controllerKey, account.did),
+  });
+  assert.equal(put.status, 201);
+});
+
+test("a did:webvh whose log is hosted elsewhere is fetched over HTTPS", async () => {
+  const account = await mintWebvh({ domain: "elsewhere.test", path: "alice" });
+  await seedSpace(fakes, { spaceId: ACCOUNT, controller: account.did });
+  const requested = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    return new Response(account.jsonl, { status: 200, headers: { "content-type": "text/jsonl" } });
+  };
+  try {
+    const res = await invoke({ path: `/space/${ACCOUNT}/meta`, signer: asWebvh(controllerKey, account.did) });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.deepEqual(requested, ["https://elsewhere.test/alice/did.jsonl"]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a Space whose did:webvh log is missing refuses every signed request", async () => {
+  const account = await mintWebvh({ path: ACCOUNT });
+  await seedSpace(fakes, { spaceId: ACCOUNT, controller: account.did });
+  const res = await invoke({ path: `/space/${ACCOUNT}/meta`, signer: asWebvh(controllerKey, account.did) });
+  assert.equal(res.status, 404);
+});
+
+test("PUT /space/{s}/meta promotes a did:key controller to a did:webvh that lists the key", async () => {
+  const account = await mintWebvh({ path: SPACE });
+  await seedWebvhLog(fakes, SPACE, account.jsonl);
+  const current = await invoke({ path: `/space/${SPACE}/meta` });
+
+  const promoted = await invoke({
+    method: "PUT",
+    path: `/space/${SPACE}/meta`,
+    json: { name: "Test Space", controller: account.did },
+    headers: { "if-match": current.headers.etag },
+  });
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.json));
+  assert.equal(promoted.json.controller, account.did);
+  assert.equal(promoted.json.createdBy, controllerKey.controller);
+  assert.equal(fakes.dynamo.tables["wallet-spaces"].get(`${BASE}/space/${SPACE}`).did.S, account.did);
+
+  // From now on the did:key form no longer invokes; the document's key does
+  const asKey = await invoke({ path: `/space/${SPACE}/meta` });
+  assert.equal(asKey.status, 404);
+  const asAccount = await invoke({ path: `/space/${SPACE}/meta`, signer: asWebvh(controllerKey, account.did) });
+  assert.equal(asAccount.status, 200);
+
+  // And the controller cannot move again
+  const again = await invoke({
+    method: "PUT",
+    path: `/space/${SPACE}/meta`,
+    json: { name: "Test Space", controller: controllerKey.controller },
+    headers: { "if-match": asAccount.headers.etag },
+    signer: asWebvh(controllerKey, account.did),
+  });
+  assert.equal(again.status, 400);
+  assert.equal(again.json.type, "https://w3id.org/pws#controller-mismatch");
+});
+
+test("PUT /space/{s}/meta refuses a promotion to a did:webvh that does not list the invoking key", async () => {
+  const account = await mintWebvh({ key: strangerKey, path: SPACE });
+  await seedWebvhLog(fakes, SPACE, account.jsonl);
+  const current = await invoke({ path: `/space/${SPACE}/meta` });
+  const res = await invoke({
+    method: "PUT",
+    path: `/space/${SPACE}/meta`,
+    json: { name: "Test Space", controller: account.did },
+    headers: { "if-match": current.headers.etag },
+  });
+  assert.equal(res.status, 400);
+  assert.equal(res.json.type, "https://w3id.org/pws#controller-mismatch");
+  assert.equal(fakes.dynamo.tables["wallet-spaces"].get(`${BASE}/space/${SPACE}`).did.S, controllerKey.controller);
+});
+
+test("PUT /space/{s}/meta provisions an unlock Space whose id is derived from the signing DID", async () => {
+  const id = deriveSpaceId(controllerKey.controller);
+  const body = { name: "Unlock", controller: controllerKey.controller, type: ["AuxiliarySpace", "Space", "UnlockSpace"] };
+  const created = await invoke({ method: "PUT", path: `/space/${id}/meta`, json: body, headers: { "if-none-match": "*" } });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  assert.equal(created.json.id, id);
+  assert.equal(created.json.controller, controllerKey.controller);
+  assert.deepEqual(created.json.type, body.type);
+  assert.ok(created.headers.etag);
+  assert.ok(fakes.s3.buckets.has(bucketOf(id)));
+  assert.notEqual(bucketOf(id), id);
+  assert.match(bucketOf(id), /^dcc-was-[0-9a-f]{40}$/);
+  const row = fakes.dynamo.tables["wallet-spaces"].get(`${BASE}/space/${id}`);
+  assert.equal(row.did.S, controllerKey.controller);
+  assert.deepEqual(row.type.L.map((entry) => entry.S), body.type);
+
+  // It is an ordinary Space from here: readable, writable, re-configurable
+  const read = await invoke({ path: `/space/${id}/meta` });
+  assert.equal(read.status, 200);
+  const record = await invoke({ method: "PUT", path: `/space/${id}/keyring/keyring.json`, json: { wrapped: "..." } });
+  assert.equal(record.status, 201);
+  assert.ok(fakes.s3.buckets.get(bucketOf(id)).has("collections/keyring/keyring.json"));
+  const renamed = await invoke({
+    method: "PUT",
+    path: `/space/${id}/meta`,
+    json: { ...body, name: "Passphrase" },
+    headers: { "if-match": read.headers.etag },
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.json.name, "Passphrase");
+
+  // And deletable, bucket and registry row alike
+  const deleted = await invoke({ method: "DELETE", path: `/space/${id}/` });
+  assert.equal(deleted.status, 204);
+  assert.ok(!fakes.s3.buckets.has(bucketOf(id)));
+  assert.ok(!fakes.dynamo.tables["wallet-spaces"].has(`${BASE}/space/${id}`));
+});
+
+test("self-provisioning is refused for any id not derived from the signer, and for a non-unlock type", async () => {
+  const mine = deriveSpaceId(controllerKey.controller);
+  const theirs = deriveSpaceId(strangerKey.controller);
+  const unlock = ["AuxiliarySpace", "Space", "UnlockSpace"];
+
+  // Someone else's unlock id
+  const stolen = await invoke({
+    method: "PUT",
+    path: `/space/${theirs}/meta`,
+    json: { name: "Unlock", controller: strangerKey.controller, type: unlock },
+    headers: { "if-none-match": "*" },
+  });
+  assert.equal(stolen.status, 404);
+
+  // A server-assigned-looking id nobody registered
+  const unknown = await invoke({
+    method: "PUT",
+    path: `/space/dcc-was-00000000-0000-4000-8000-0000000000ff/meta`,
+    json: { name: "Unlock", controller: controllerKey.controller, type: unlock },
+    headers: { "if-none-match": "*" },
+  });
+  assert.equal(unknown.status, 404);
+
+  // The derived id, but not an unlock Space
+  const plain = await invoke({
+    method: "PUT",
+    path: `/space/${mine}/meta`,
+    json: { name: "Mine", controller: controllerKey.controller },
+    headers: { "if-none-match": "*" },
+  });
+  assert.equal(plain.status, 400);
+  assert.ok(!fakes.s3.buckets.has(bucketOf(mine)));
+
+  // Unsigned
+  const unsigned = await invoke({
+    method: "PUT",
+    path: `/space/${mine}/meta`,
+    json: { name: "Unlock", controller: controllerKey.controller, type: unlock },
+    headers: { "if-none-match": "*" },
+    signer: null,
+  });
+  assert.equal(unsigned.status, 404);
 });

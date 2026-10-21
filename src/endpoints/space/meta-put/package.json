@@ -1,0 +1,12 @@
+{
+  "name": "was-space-meta-put",
+  "version": "1.0.0",
+  "description": "PUT /space/{s}/meta: replace Space Metadata, provision an unlock Space, promote a controller to a did:webvh",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0"
+  },
+  "dependencies": {
+    "@interop/did-method-webvh": "^5.15.0"
+  }
+}

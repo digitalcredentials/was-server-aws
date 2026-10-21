@@ -2,7 +2,7 @@ import { DynamoDBClient, DeleteItemCommand } from "@aws-sdk/client-dynamodb";
 import { DeleteBucketCommand } from "@aws-sdk/client-s3";
 import { handler } from "was-lib/handler.mjs";
 import { noContent, NO_STORE } from "was-lib/http.mjs";
-import { s3, isNoBucket, deletePrefix } from "was-lib/store.mjs";
+import { s3, isNoBucket, deletePrefix, bucketOf } from "was-lib/store.mjs";
 
 // DELETE /space/{s}/ -- the whole Space: its bucket (emptied first) and its
 // registry row. Root capability only (the container rule). An
@@ -16,7 +16,7 @@ export const lambdaHandler = handler(
   async (req, { spaceId, registryUrl }) => {
     try {
       await deletePrefix(spaceId, "");
-      await s3.send(new DeleteBucketCommand({ Bucket: spaceId }));
+      await s3.send(new DeleteBucketCommand({ Bucket: bucketOf(spaceId) }));
     } catch (err) {
       if (!isNoBucket(err) && err?.status !== 404) {
         throw err;
