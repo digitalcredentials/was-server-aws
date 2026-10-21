@@ -100,6 +100,18 @@ involved. Any other `did:webvh` is fetched over HTTPS from the location the
 DID encodes, with a timeout (`WEBVH_FETCH_TIMEOUT_MS`, 3000) and a size cap
 (`WEBVH_MAX_LOG_BYTES`, 1 MiB). One verifier, two fetchers.
 
+The identity domain itself is a CloudFront distribution the stack creates
+(`IdDistribution`, aliased to `IdDomain` under `IdCertificateArn`, with
+alias records in `HostedZoneId`): a CloudFront Function rewrites
+`/{spaceId}/did.jsonl` and `/{spaceId}/did.json` onto
+`/space/{spaceId}/id/...` on the API (`ApiDomain`), and everything else
+answers 404. Caching is disabled, so a resolver always sees the log as it
+stands. The `id` collection has to be world-readable (`PublicCanRead`) for
+the distribution's unsigned fetch to succeed; the wallet sets that policy
+when it publishes the log. A DID therefore names the identity domain, not
+the storage host, and if a Space moves the distribution's origin (or a
+redirect at the identity domain) follows it.
+
 Two operations exist for a wallet to move an account onto a `did:webvh`
 (the FreeWallet model):
 

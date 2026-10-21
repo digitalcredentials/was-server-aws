@@ -17,7 +17,7 @@ import { ZcapClient } from "@interop/ezcap";
 import { WasClient, discoverService } from "@interop/was-client";
 import { createEdvEncryption, ensureFirstEpoch, ownerRecipient } from "@interop/was-client/edv";
 import { X25519KeyAgreementKey2020 } from "@interop/x25519-key-agreement-key";
-import { createDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
+import { createDID, resolveDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
 import { createHash, randomBytes } from "node:crypto";
 
 const WAS = (process.env.WAS_URL ?? "https://was.lcw-sandbox.org").replace(/\/+$/, "");
@@ -155,8 +155,12 @@ try {
     capabilityInvocation: relation,
     capabilityDelegation: relation,
   });
-  const log = await space.collection("id").resource("did.jsonl").put(new TextEncoder().encode(logToJsonlString(minted.log)), { contentType: "text/jsonl" });
+  const log = await space.collection("id", { encryption: "plaintext" }).resource("did.jsonl").put(new TextEncoder().encode(logToJsonlString(minted.log)), { contentType: "text/jsonl" });
   check("did.jsonl published into the id collection", Boolean(log.etag));
+  const idPolicy = await space.collection("id", { encryption: "plaintext" }).setPublic();
+  check("the id collection is made world-readable", Boolean(idPolicy.etag));
+  const resolved = await resolveDID(minted.did);
+  check("the DID resolves over HTTPS through the identity domain", resolved.didDocument?.id === minted.did, resolved.didResolutionMetadata?.error ?? resolved.didDocument?.id);
   const promoted = await space.configure({ name: "live check (renamed)", controller: minted.did });
   check("space.configure() promotes the controller to the did:webvh", promoted.description.controller === minted.did, promoted.description.controller);
   check("the did:key no longer reads the promoted Space", (await space.describe()) === null);
@@ -166,7 +170,7 @@ try {
   owner = asAccount.space(spaceId);
   const accountView = await owner.describe();
   check("the account's key reads the promoted Space", accountView?.controller === minted.did);
-  const asAccountWrite = await owner.collection("notes2").resource("after.json").put(new TextEncoder().encode('{"after":true}'), { contentType: "application/json" });
+  const asAccountWrite = await owner.collection("notes2", { encryption: "plaintext" }).resource("after.json").put(new TextEncoder().encode('{"after":true}'), { contentType: "application/json" });
   check("the account's key writes to the promoted Space", Boolean(asAccountWrite.etag));
   const spacesAsAccount = await asAccount.listSpaces();
   check("listSpaces() under the did:webvh lists the promoted Space", spacesAsAccount.items.some((item) => item.id === spaceId));
@@ -179,7 +183,7 @@ try {
   const unlock = asUnlock.space(unlockId);
   const made = await unlock.configure({ name: "Unlock", controller: unlockKey.controller, type: ["AuxiliarySpace", "Space", "UnlockSpace"], force: true });
   check("configure() on a derived id provisions an unlock Space", made.description.controller === unlockKey.controller && made.description.type.includes("UnlockSpace"), JSON.stringify(made.description.type));
-  const record = await unlock.collection("keyring").resource("keyring.json").put(new TextEncoder().encode('{"wrapped":"..."}'), { contentType: "application/json" });
+  const record = await unlock.collection("keyring", { encryption: "plaintext" }).resource("keyring.json").put(new TextEncoder().encode('{"wrapped":"..."}'), { contentType: "application/json" });
   check("the unlock Space takes a record", Boolean(record.etag));
   const unlockGone = await unlock.deleteWithOutcome();
   check("the unlock Space deletes", unlockGone.outcome === "deleted");
