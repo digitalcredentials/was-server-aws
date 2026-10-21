@@ -240,9 +240,12 @@ s3://{space_id}/
         └── {resource_id}         Resource content
 ```
 
-The registry (`wallet-spaces`, owned by the lcw-back-end stack) has one row
+The registry (`was-spaces`, the `WasSpacesTable` of this stack) has one row
 per Space: `spaceURL` (no trailing slash), `did`, `type` (a list), `name`,
-`CreatedAt`.
+`CreatedAt`, with a `by-did` index for the listing. The authorizer reads it
+on every request and the Space functions write it. lcw-back-end's
+registration and login still use it by name, an interim that stage 3 of the
+did:webvh work removes.
 
 ## Project layout
 

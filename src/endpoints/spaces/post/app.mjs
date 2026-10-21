@@ -15,13 +15,13 @@ import { HttpProblem, invalidRequestBody, notFound } from "was-lib/problems.mjs"
 // server-assigned (also the bucket name); the bucket is created with its
 // metadata object and the Space registered.
 //
-// The registry row (the wallet-spaces table, keyed by space URL without a
+// The registry row (the was-spaces table, keyed by space URL without a
 // trailing slash, with a by-did index) holds authorization and lookup data
 // only: the controller DID, the type array, the name (mirrored for
 // listings) and the creation time.
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "wallet-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
 const COUPONS_TABLE = process.env.COUPONS_TABLE_NAME ?? "was-coupons";
 const SPACE_URL_BASE = (process.env.SPACE_URL_BASE ?? "https://was.example.org/space").replace(/\/+$/, "");
 

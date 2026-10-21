@@ -28,7 +28,7 @@ import { deriveSpaceId, invokerKeyListed, isWebvhDid, resolveWebvhDocument } fro
 //     invoke. Any other controller change is refused.
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "wallet-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
 const SPACE_URL_BASE = (process.env.SPACE_URL_BASE ?? "https://was.example.org/space").replace(/\/+$/, "");
 const UNLOCK_TYPE = "UnlockSpace";
 

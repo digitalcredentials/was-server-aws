@@ -78,7 +78,7 @@ test("POST /spaces/ provisions a Space for the stated controller", async () => {
   const id = res.json.id;
   assert.ok(fakes.s3.buckets.has(id));
   assert.ok(fakes.s3.buckets.get(id).has("meta/space.json"));
-  const row = fakes.dynamo.tables["wallet-spaces"].get(`${BASE}/space/${id}`);
+  const row = fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${id}`);
   assert.equal(row.did.S, controllerKey.controller);
   assert.deepEqual(row.type.L, [{ S: "Space" }]);
 });
@@ -185,7 +185,7 @@ test("PUT /space/{s}/meta renames the Space under If-Match and mirrors the name 
   assert.equal(res.json.name, "Renamed");
   assert.ok(res.headers.etag && res.headers.etag !== current.headers.etag);
   assert.equal(res.headers["cache-control"], "no-store");
-  assert.equal(fakes.dynamo.tables["wallet-spaces"].get(`${BASE}/space/${SPACE}`).name.S, "Renamed");
+  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE}`).name.S, "Renamed");
 
   const stale = await invoke({
     method: "PUT",
@@ -566,7 +566,7 @@ test("DELETE /space/{s}/ removes the bucket and the registry row", async () => {
   const res = await invoke({ method: "DELETE", path: `/space/${SPACE}/` });
   assert.equal(res.status, 204);
   assert.equal(fakes.s3.buckets.has(SPACE), false);
-  assert.equal(fakes.dynamo.tables["wallet-spaces"].has(`${BASE}/space/${SPACE}`), false);
+  assert.equal(fakes.dynamo.tables["was-spaces"].has(`${BASE}/space/${SPACE}`), false);
   const after = await invoke({ path: `/space/${SPACE}/meta` });
   assert.equal(after.status, 404);
 });
@@ -642,7 +642,7 @@ test("PUT /space/{s}/meta promotes a did:key controller to a did:webvh that list
   assert.equal(promoted.status, 200, JSON.stringify(promoted.json));
   assert.equal(promoted.json.controller, account.did);
   assert.equal(promoted.json.createdBy, controllerKey.controller);
-  assert.equal(fakes.dynamo.tables["wallet-spaces"].get(`${BASE}/space/${SPACE}`).did.S, account.did);
+  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE}`).did.S, account.did);
 
   // From now on the did:key form no longer invokes; the document's key does
   const asKey = await invoke({ path: `/space/${SPACE}/meta` });
@@ -674,7 +674,7 @@ test("PUT /space/{s}/meta refuses a promotion to a did:webvh that does not list 
   });
   assert.equal(res.status, 400);
   assert.equal(res.json.type, "https://w3id.org/pws#controller-mismatch");
-  assert.equal(fakes.dynamo.tables["wallet-spaces"].get(`${BASE}/space/${SPACE}`).did.S, controllerKey.controller);
+  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE}`).did.S, controllerKey.controller);
 });
 
 test("PUT /space/{s}/meta provisions an unlock Space whose id is derived from the signing DID", async () => {
@@ -689,7 +689,7 @@ test("PUT /space/{s}/meta provisions an unlock Space whose id is derived from th
   assert.ok(fakes.s3.buckets.has(bucketOf(id)));
   assert.notEqual(bucketOf(id), id);
   assert.match(bucketOf(id), /^dcc-was-[0-9a-f]{40}$/);
-  const row = fakes.dynamo.tables["wallet-spaces"].get(`${BASE}/space/${id}`);
+  const row = fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${id}`);
   assert.equal(row.did.S, controllerKey.controller);
   assert.deepEqual(row.type.L.map((entry) => entry.S), body.type);
 
@@ -712,7 +712,7 @@ test("PUT /space/{s}/meta provisions an unlock Space whose id is derived from th
   const deleted = await invoke({ method: "DELETE", path: `/space/${id}/` });
   assert.equal(deleted.status, 204);
   assert.ok(!fakes.s3.buckets.has(bucketOf(id)));
-  assert.ok(!fakes.dynamo.tables["wallet-spaces"].has(`${BASE}/space/${id}`));
+  assert.ok(!fakes.dynamo.tables["was-spaces"].has(`${BASE}/space/${id}`));
 });
 
 test("self-provisioning is refused for any id not derived from the signer, and for a non-unlock type", async () => {

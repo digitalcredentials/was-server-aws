@@ -10,7 +10,7 @@ import { s3, isNoBucket, deletePrefix, bucketOf } from "was-lib/store.mjs";
 // cleaned up by retrying.
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "wallet-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
 
 export const lambdaHandler = handler(
   async (req, { spaceId, registryUrl }) => {

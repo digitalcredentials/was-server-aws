@@ -32,7 +32,7 @@ import { verifyInvocation, signerDid, rootCapabilityId } from "./zcap.mjs";
 // controller. The controller may be a did:key or a did:webvh (zcap.mjs).
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "wallet-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
 
 function header(headers, name) {
   const match = Object.keys(headers).find((key) => key.toLowerCase() === name);

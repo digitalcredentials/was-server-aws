@@ -170,7 +170,7 @@ export class FakeS3 {
 }
 
 export class FakeDynamo {
-  tables = { "wallet-spaces": new Map(), "was-coupons": new Map() };
+  tables = { "was-spaces": new Map(), "was-coupons": new Map() };
 
   table(name) {
     const table = this.tables[name];

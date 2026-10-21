@@ -12,7 +12,7 @@ import { pageLimit, nextLink } from "was-lib/ops/listing.mjs";
 // see, which is nothing.
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "wallet-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
 
 // Older rows carry the string 'credential' or 'batch'; they read as
 // ['Space'] / ['Space', 'BatchSpace'].
