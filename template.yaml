@@ -15,6 +15,22 @@ Parameters:
   IdDomain:
     Type: String
     Default: id.lcw-sandbox.org
+  # The identity domain is served by a CloudFront distribution in front of
+  # the API's own domain: /{spaceId}/did.jsonl and /{spaceId}/did.json are
+  # rewritten onto the Space's `id` collection. The certificate must cover
+  # IdDomain and live in us-east-1; the zone takes the alias records.
+  ApiDomain:
+    Type: String
+    Description: The API's public host name, the distribution's origin.
+    Default: was.lcw-sandbox.org
+  IdCertificateArn:
+    Type: String
+    Description: ACM certificate (us-east-1) covering IdDomain.
+    Default: arn:aws:acm:us-east-1:747170788015:certificate/c63f6ba4-2630-4c4f-973f-4fd6436962f0
+  HostedZoneId:
+    Type: String
+    Description: Route 53 hosted zone the IdDomain alias records go in.
+    Default: Z04250862QG6MQUAE24XV
 
 Globals:
   Function:
@@ -64,6 +80,95 @@ Resources:
       CompatibleRuntimes:
         - nodejs24.x
       RetentionPolicy: Delete
+
+  # ---------------------------------------------------------------------------
+  # The identity domain: did:webvh:{scid}:{IdDomain}:{spaceId} resolves by
+  # fetching https://{IdDomain}/{spaceId}/did.jsonl, which this distribution
+  # rewrites onto the Space's world-readable `id` collection on the API. A
+  # DID therefore names the identity domain, not the storage host, and if
+  # the Space moves the distribution's origin (or a redirect here) follows
+  # it. Nothing is cached: a resolver must see the log as it is now.
+  IdRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub ${AWS::StackName}-id-rewrite
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Rewrites /{spaceId}/did.jsonl onto /space/{spaceId}/id/did.jsonl
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var match = request.uri.match(/^\/([A-Za-z0-9_-]+)\/(did\.jsonl|did\.json)$/);
+          if (!match) {
+            return {
+              statusCode: 404,
+              statusDescription: 'Not Found',
+              headers: { 'content-type': { value: 'text/plain' } },
+              body: 'Not found'
+            };
+          }
+          request.uri = '/space/' + match[1] + '/id/' + match[2];
+          return request;
+        }
+
+  IdDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub did:webvh identity domain for ${AWS::StackName}
+        Aliases:
+          - !Ref IdDomain
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: api
+            DomainName: !Ref ApiDomain
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: api
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          # CachingDisabled: every resolution reads the log as it stands.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          # AllViewerExceptHostHeader: the Origin header reaches the API so
+          # its CORS answers browsers resolving a DID.
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt IdRewriteFunction.FunctionMetadata.FunctionARN
+        ViewerCertificate:
+          AcmCertificateArn: !Ref IdCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+
+  IdDnsA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref IdDomain
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt IdDistribution.DomainName
+
+  IdDnsAAAA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref IdDomain
+      Type: AAAA
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt IdDistribution.DomainName
 
   # An HTTP API rather than a REST API: its CORS is a gateway feature that
   # injects the headers into every response, and its $default stage serves
@@ -1084,6 +1189,12 @@ Outputs:
   ApiEndpoint:
     Description: The API's base URL (the service description is at its root)
     Value: !Sub "https://${WASHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
+  IdDomainUrl:
+    Description: The identity domain a Space's did:webvh log resolves from
+    Value: !Sub "https://${IdDomain}/"
+  IdDistributionId:
+    Description: The identity domain's CloudFront distribution
+    Value: !Ref IdDistribution
   WasLibLayer:
     Description: The shared-code layer ARN
     Value: !Ref WasLibLayer

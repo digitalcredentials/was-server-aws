@@ -17,7 +17,7 @@ import { ZcapClient } from "@interop/ezcap";
 import { WasClient, discoverService } from "@interop/was-client";
 import { createEdvEncryption, ensureFirstEpoch, ownerRecipient } from "@interop/was-client/edv";
 import { X25519KeyAgreementKey2020 } from "@interop/x25519-key-agreement-key";
-import { createDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
+import { createDID, resolveDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
 import { createHash, randomBytes } from "node:crypto";
 
 const WAS = (process.env.WAS_URL ?? "https://was.lcw-sandbox.org").replace(/\/+$/, "");
@@ -157,6 +157,10 @@ try {
   });
   const log = await space.collection("id", { encryption: "plaintext" }).resource("did.jsonl").put(new TextEncoder().encode(logToJsonlString(minted.log)), { contentType: "text/jsonl" });
   check("did.jsonl published into the id collection", Boolean(log.etag));
+  const idPolicy = await space.collection("id", { encryption: "plaintext" }).setPublic();
+  check("the id collection is made world-readable", Boolean(idPolicy.etag));
+  const resolved = await resolveDID(minted.did);
+  check("the DID resolves over HTTPS through the identity domain", resolved.didDocument?.id === minted.did, resolved.didResolutionMetadata?.error ?? resolved.didDocument?.id);
   const promoted = await space.configure({ name: "live check (renamed)", controller: minted.did });
   check("space.configure() promotes the controller to the did:webvh", promoted.description.controller === minted.did, promoted.description.controller);
   check("the did:key no longer reads the promoted Space", (await space.describe()) === null);
