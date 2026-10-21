@@ -40,10 +40,8 @@ Globals:
       - !Ref WasLibLayer
     Environment:
       Variables:
-        # Spaces registry (table owned by the lcw-back-end stack): one row
-        # per Space, keyed by spaceURL, carrying the controller did, the type
-        # array and the name.
-        SPACES_TABLE_NAME: wallet-spaces
+        # The spaces registry (WasSpacesTable below).
+        SPACES_TABLE_NAME: !Ref WasSpacesTable
         COUPONS_TABLE_NAME: was-coupons
         SPACE_URL_BASE: !Ref SpaceBaseUrl
         ID_DOMAIN: !Ref IdDomain
@@ -66,6 +64,33 @@ Resources:
       KeySchema:
         - AttributeName: coupon
           KeyType: HASH
+
+  # The spaces registry: one row per Space, keyed by its URL (no trailing
+  # slash), carrying the controller DID (`did`), the type array, the name and
+  # the creation time, with a by-did index for the listing. The authorizer
+  # reads it on every request and the Space functions write it. Nothing else
+  # should: lcw-back-end's registration and login still use it by name until
+  # stage 3 of the did:webvh work removes that.
+  WasSpacesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: was-spaces
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: spaceURL
+          AttributeType: S
+        - AttributeName: did
+          AttributeType: S
+      KeySchema:
+        - AttributeName: spaceURL
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: by-did
+          KeySchema:
+            - AttributeName: did
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
 
   # The code every endpoint function shares (layers/was-lib, resolved as
   # `was-lib/...` from /opt/nodejs/node_modules). Plain ES modules with no
@@ -231,7 +256,7 @@ Resources:
       Timeout: 10
       Policies:
         - DynamoDBReadPolicy:
-            TableName: wallet-spaces
+            TableName: !Ref WasSpacesTable
         - Statement:
             # The DID logs of this deployment's accounts, read from their
             # Spaces' buckets (ListBucket on the one key so a missing log is
@@ -309,7 +334,7 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - DynamoDBWritePolicy:
-            TableName: wallet-spaces
+            TableName: !Ref WasSpacesTable
         - DynamoDBCrudPolicy:
             TableName: !Ref WasCouponsTable
         - Statement:
@@ -341,7 +366,7 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - DynamoDBReadPolicy:
-            TableName: wallet-spaces
+            TableName: !Ref WasSpacesTable
       Events:
         Get:
           Type: HttpApi
@@ -426,7 +451,7 @@ Resources:
             - Effect: Allow
               Action:
                 - dynamodb:DeleteItem
-              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/wallet-spaces
+              Resource: !GetAtt WasSpacesTable.Arn
             - Effect: Allow
               Action:
                 - s3:ListBucket
@@ -511,7 +536,7 @@ Resources:
               Action:
                 - dynamodb:UpdateItem
                 - dynamodb:PutItem
-              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/wallet-spaces
+              Resource: !GetAtt WasSpacesTable.Arn
             - Effect: Allow
               Action: s3:CreateBucket
               Resource: arn:aws:s3:::dcc-was-*
