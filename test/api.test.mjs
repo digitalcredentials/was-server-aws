@@ -4,6 +4,9 @@
 //
 //   cd test && npm test
 
+// http-client first: @interop/jsonld requires it at load, and the ezcap
+// imports below would otherwise reach jsonld before it is initialized.
+import "@interop/http-client";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -11,6 +14,10 @@ import { installFakes } from "./fakes.mjs";
 import { invoke, seedSpace, seedObject, controllerKey, strangerKey, BASE, asWebvh, mintWebvh, seedWebvhLog, bucketOf, clearWebvhCache } from "./harness.mjs";
 import { deriveSpaceId } from "was-lib/webvh.mjs";
 import { updateDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
+import { ZcapClient } from "@interop/ezcap";
+import { Ed25519Signature2020 } from "@interop/ed25519-signature";
+import { EddsaJcs2022 } from "@interop/ed25519-signature/eddsa-jcs-2022";
+import { rootCapabilityId } from "../src/authorizer/zcap.mjs";
 
 const SPACE = "dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c";
 const SPACE_URL = `${BASE}/space/${SPACE}/`;
@@ -795,4 +802,51 @@ test("self-provisioning is refused for any id not derived from the signer, and f
     signer: null,
   });
   assert.equal(unsigned.status, 404);
+});
+
+// --- delegated capabilities ----------------------------------------------------
+
+// The controller delegates a capability on the whole Space to the stranger,
+// under `SuiteClass`, allowing the actions given.
+async function delegateSpace(SuiteClass, allowedActions = ["GET", "PUT", "DELETE"]) {
+  const client = new ZcapClient({ SuiteClass, delegationSigner: controllerKey.signer() });
+  return client.delegate({
+    capability: rootCapabilityId(SPACE_URL),
+    controller: strangerKey.controller,
+    invocationTarget: SPACE_URL,
+    allowedActions,
+    expires: new Date(Date.now() + 24 * 3600 * 1000),
+  });
+}
+
+test("a delegated capability authorizes Resource operations under either proof suite, and container operations stay root-only", async () => {
+  for (const SuiteClass of [EddsaJcs2022, Ed25519Signature2020]) {
+    const capability = await delegateSpace(SuiteClass);
+    const path = `/space/${SPACE}/keyring/${SuiteClass.name}`;
+
+    const created = await invoke({ method: "PUT", path, json: { v: 1 }, signer: strangerKey, capability });
+    assert.equal(created.status, 201, `${SuiteClass.name}: ${created.body}`);
+    const read = await invoke({ path, signer: strangerKey, capability });
+    assert.equal(read.status, 200, `${SuiteClass.name}: ${read.body}`);
+    assert.deepEqual(read.json, { v: 1 });
+    const removed = await invoke({ method: "DELETE", path, signer: strangerKey, capability });
+    assert.equal(removed.status, 204, `${SuiteClass.name}: ${removed.body}`);
+
+    // The Space itself, its metadata and a Collection are container
+    // operations: a delegated capability is refused with a 404
+    const spaceGone = await invoke({ method: "DELETE", path: `/space/${SPACE}/`, signer: strangerKey, capability });
+    assert.equal(spaceGone.status, 404);
+    assert.ok(fakes.s3.buckets.has(bucketOf(SPACE)));
+    const collectionGone = await invoke({ method: "DELETE", path: `/space/${SPACE}/keyring/`, signer: strangerKey, capability });
+    assert.equal(collectionGone.status, 404);
+  }
+});
+
+test("a delegated capability is refused for an action it does not allow, and without it the stranger is refused", async () => {
+  const readOnly = await delegateSpace(EddsaJcs2022, ["GET"]);
+  const write = await invoke({ method: "PUT", path: `/space/${SPACE}/keyring/record`, json: { v: 1 }, signer: strangerKey, capability: readOnly });
+  assert.equal(write.status, 404);
+  const bare = await invoke({ method: "PUT", path: `/space/${SPACE}/keyring/record`, json: { v: 1 }, signer: strangerKey });
+  assert.equal(bare.status, 404);
+  assert.ok(!objectKeys().some((key) => key.startsWith("keyring/")));
 });

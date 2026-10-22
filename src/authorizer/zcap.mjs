@@ -3,6 +3,8 @@ import { verifyCapabilityInvocation } from "@interop/http-signature-zcap-verify"
 import * as didKey from "@interop/did-method-key";
 import { Ed25519VerificationKey } from "@interop/ed25519-verification-key";
 import { Ed25519Signature2020 } from "@interop/ed25519-signature";
+import { createVerifyCryptosuite } from "@interop/ed25519-signature/eddsa-jcs-2022";
+import { DataIntegrityProof } from "@interop/data-integrity-proof";
 import * as webvhDriver from "@interop/did-method-webvh";
 import { isWebvhDid, resolveWebvhDocument, verificationMethodFor } from "was-lib/webvh.mjs";
 
@@ -126,6 +128,14 @@ function rootCapabilityLoader(controller) {
 
 export const rootCapabilityId = (url) => `urn:zcap:root:${encodeURIComponent(url)}`;
 
+// The proof suites a delegated capability's proof may carry: the zcap
+// library verifies each link of a delegation chain with whichever of these
+// matches the proof's type. Ed25519Signature2020 is what ezcap's default
+// signs; eddsa-jcs-2022 is what @interop/was-client and wallet-core clients
+// sign every delegation with. (The invocation itself is an HTTP signature,
+// verified through `getVerifier`, and carries no suite.)
+const delegationSuites = () => [new Ed25519Signature2020(), new DataIntegrityProof({ cryptosuite: createVerifyCryptosuite() })];
+
 // Verifies that the request carries an invocation of one of `urls` (the
 // delivered URL and, when ids were percent-encoded, the re-encoded URL the
 // client signed) authorized by `controller`. Resolves to
@@ -140,7 +150,7 @@ export async function verifyInvocation({ method, host, headers }, { controller, 
         method,
         // The signature is computed over the lowercase header name.
         headers,
-        suite: new Ed25519Signature2020(),
+        suite: delegationSuites(),
         getVerifier,
         documentLoader,
         expectedHost: host,
