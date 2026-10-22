@@ -46,19 +46,27 @@ function absoluteIds(doc) {
   return out;
 }
 
+const capabilityMethod = (doc, id) =>
+  verificationMethodFor(doc, id, "capabilityInvocation") ?? verificationMethodFor(doc, id, "capabilityDelegation");
+
 // The did:webvh document, or the one verification method a key URL names.
+// A key the cached document does not list is looked up once more against
+// a fresh resolution: a credential added a moment ago must work at once,
+// while a removed key keeps working only until the cache expires.
 async function resolveWebvh(id) {
   const [did, fragment] = id.split("#");
-  const doc = await resolveWebvhDocument(did, { driver: webvhDriver });
+  let doc = await resolveWebvhDocument(did, { driver: webvhDriver });
   if (!doc) {
     throw new Error(`No DID log found for ${did}.`);
   }
   if (fragment === undefined) {
     return absoluteIds(doc);
   }
-  const method =
-    verificationMethodFor(doc, id, "capabilityInvocation") ??
-    verificationMethodFor(doc, id, "capabilityDelegation");
+  let method = capabilityMethod(doc, id);
+  if (!method) {
+    doc = await resolveWebvhDocument(did, { driver: webvhDriver, fresh: true });
+    method = doc ? capabilityMethod(doc, id) : null;
+  }
   if (!method || !method.publicKeyMultibase) {
     throw new Error(`${id} is not a capability key of ${did}.`);
   }
@@ -74,6 +82,10 @@ async function resolveWebvh(id) {
 // The document loader resolves the controller DID behind a capability as
 // well as the signing key, so did:webvh joins did:key and did:web there.
 const didResolver = createDefaultDidResolver();
+// The resolver memoizes by DID for a few seconds; did:webvh documents are
+// cached (and refreshed on a missing key) by was-lib/webvh.mjs, so the
+// resolver's own memo would only serve the controller document stale.
+didResolver._cache = { memoize: ({ fn }) => fn() };
 didResolver.use({ method: "webvh", get: ({ did, url }) => resolveWebvh(did ?? url) });
 const baseDocumentLoader = securityLoader({ didResolver });
 
