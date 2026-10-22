@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { installFakes } from "./fakes.mjs";
 import { invoke, seedSpace, seedObject, controllerKey, strangerKey, BASE, asWebvh, mintWebvh, seedWebvhLog, bucketOf, clearWebvhCache } from "./harness.mjs";
 import { deriveSpaceId } from "was-lib/webvh.mjs";
+import { updateDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
 
 const SPACE = "dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c";
 const SPACE_URL = `${BASE}/space/${SPACE}/`;
@@ -611,6 +612,33 @@ test("a did:webvh-controlled Space authorizes the keys its current document list
     signer: asWebvh(controllerKey, account.did),
   });
   assert.equal(put.status, 201);
+});
+
+test("a key added to the document is accepted before the cache expires", async () => {
+  const account = await mintWebvh({ path: ACCOUNT });
+  await seedSpace(fakes, { spaceId: ACCOUNT, controller: account.did });
+  await seedWebvhLog(fakes, ACCOUNT, account.jsonl);
+  // The first request caches the one-key document
+  const first = await invoke({ path: `/space/${ACCOUNT}/meta`, signer: asWebvh(controllerKey, account.did) });
+  assert.equal(first.status, 200);
+  // A second key joins the same log (a new credential); the cache still
+  // holds the old document, and the new key is accepted at once
+  const added = strangerKey.fingerprint();
+  const members = [controllerKey.fingerprint(), added];
+  const grown = await updateDID({
+    log: account.log,
+    signer: signerFromDidKeySigner(controllerKey.signer()),
+    updateKeys: [`did:key:${controllerKey.fingerprint()}`],
+    verificationMethods: members.map((publicKeyMultibase) => ({ type: "Multikey", publicKeyMultibase })),
+    vmIdFragment: "multibase",
+    authentication: members.map((m) => `#${m}`),
+    assertionMethod: members.map((m) => `#${m}`),
+    capabilityInvocation: members.map((m) => `#${m}`),
+    capabilityDelegation: members.map((m) => `#${m}`),
+  });
+  await seedObject(fakes, bucketOf(ACCOUNT), "collections/id/did.jsonl", logToJsonlString(grown.log), "text/jsonl");
+  const asNew = await invoke({ path: `/space/${ACCOUNT}/meta`, signer: asWebvh(strangerKey, account.did) });
+  assert.equal(asNew.status, 200, JSON.stringify(asNew.json));
 });
 
 test("a did:webvh whose log is hosted elsewhere is fetched over HTTPS", async () => {
