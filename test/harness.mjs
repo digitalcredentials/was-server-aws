@@ -47,7 +47,8 @@ function isText(contentType) {
 // percent-encoded as a client would); the event delivers it decoded, as
 // API Gateway does. `json` is signed and sent as JSON; `body` (a Buffer or
 // string) is signed and sent as given with `contentType`. `deliveredJson`
-// replaces the body after signing (a body/digest mismatch).
+// replaces the body after signing (a body/digest mismatch). `capability` is
+// a delegated zcap the invocation rides instead of the URL's root capability.
 export async function invoke({
   method = "GET",
   path,
@@ -58,6 +59,7 @@ export async function invoke({
   signer = controllerKey,
   tamper = false,
   deliveredJson,
+  capability,
 }) {
   const url = `${BASE}${path}`;
   const bodyBuffer =
@@ -85,6 +87,7 @@ export async function invoke({
       ...(json === undefined && bodyBuffer !== null && { body: bodyBuffer }),
       capabilityAction: method,
       invocationSigner: signer.signer(),
+      ...(capability && { capability }),
     });
     requestHeaders = { ...requestHeaders, ...signed };
     if (tamper) {

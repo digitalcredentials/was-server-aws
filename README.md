@@ -181,7 +181,9 @@ answers are different.
   registry row for `{base}/space/{s}` and verifies the invocation against it
   (every `urn:zcap:root:...` resolves to a root capability controlled by
   that DID; a delegation chain may start from the invoked URL, the
-  Collection or the Space container). For `/spaces/` it verifies against the
+  Collection or the Space container, and each delegation's proof may be
+  `Ed25519Signature2020` or `eddsa-jcs-2022`, the suite `@interop/was-client`
+  and wallet-core clients sign with). For `/spaces/` it verifies against the
   DID that signed. The URL is checked as delivered and, when ids were
   percent-encoded, re-encoded — API Gateway hands the path decoded. It
   **never denies**: it answers `isAuthorized: true` with the result in the
