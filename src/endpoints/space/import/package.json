@@ -1,0 +1,13 @@
+{
+  "name": "was-space-import",
+  "version": "1.0.0",
+  "description": "POST /space/{s}/import: merge a Space archive into an existing Space",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0"
+  },
+  "dependencies": {
+    "@interop/space-archive": "^0.12.0",
+    "@interop/storage-core": "^0.44.0"
+  }
+}

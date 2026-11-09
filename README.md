@@ -27,6 +27,8 @@ to the canonical one.
 | GET | `/space/{s}/meta` | `SpaceMetaGetFn` | Space Metadata |
 | PUT | `/space/{s}/meta` | `SpaceMetaPutFn` | replace it (`type` write-once; `controller` fixed) |
 | GET / PUT / DELETE | `/space/{s}/policy` | `SpacePolicy{Get,Put,Delete}Fn` | the Space's access-control policy |
+| POST | `/space/{s}/export` | `SpaceExportFn` | the Space as a Space archive (tar) |
+| POST | `/space/{s}/import` | `SpaceImportFn` | merge a Space archive into the Space |
 | GET | `/space/{s}/{c}/` | `ResourceGetFn` | list the Collection's Resources |
 | POST | `/space/{s}/{c}/` | `ResourceCreateFn` | create a Resource with a server-assigned id |
 | DELETE | `/space/{s}/{c}/` | `ResourceDeleteFn` | delete the Collection and everything in it |
@@ -78,6 +80,41 @@ aws dynamodb put-item --table-name was-coupons --item \
 **GET /spaces/** lists the Spaces registered to the DID that signed the
 request (the registry's `by-did` index), paged. An unsigned or unverifiable
 caller gets an empty list, never an error.
+
+### Export and import
+
+`POST /space/{s}/export` answers the Space as a Space archive, the tar
+layout of the specification's Export Space operation (currently its PR 92,
+"Specify Export and Import and the Space Archive Format"), and
+`POST /space/{s}/import` merges such an archive into an existing Space. Both
+are advertised by the `export` feature token and need a capability on the
+Space, its root or a delegated one allowing `POST`; an unsigned export is a
+`404` like any read. The `@interop/space-archive` codec, the reference
+implementation's, writes and reads the layout, so the file names and
+`manifest.yml` are its own; each function bundles it (`src/endpoints/space/{export,import}/package.json`).
+
+An archive holds the Space Metadata object and policy, and each Collection's
+metadata, policy, Resources (content as stored, so encrypted collections stay
+encrypted, with a metadata sidecar each) and Resource policies, plus this
+server's service description as `service.json`. What this server does not keep
+is absent: no tombstones, chunks, governing history logs, revocation records or
+provenance statements. An unchanged Space exports byte-identical archives.
+
+Import adds what the Space lacks and skips what it holds, so a second import
+of the same archive changes nothing: the Space's `name` is restored under the
+root capability only (and mirrored to the registry), `type` must match or the
+import is refused with `invalid-import` before anything is written, policies
+are written only where none exist, a Collection the Space already holds keeps
+its metadata while its missing Resources are still imported, and an archived
+Collection naming a backend is `unsupported-backend`. The report counts
+created and skipped Collections, Resources and policies, says whether the
+Space Metadata was `restored` or `skipped`, and lists every attested object as
+`unattested`, since no provenance is verified yet.
+
+The archive is built in memory and returned as one response. API Gateway
+carries at most 6 MB after base64 encoding, so an archive over 4 MB is refused
+with `413 payload-too-large`; larger Spaces will need a presigned-URL
+hand-off.
 
 ### did:webvh controllers
 
@@ -354,10 +391,6 @@ response deliberately says only `404`.
 
 ## Known gaps
 
-- **Delegated capabilities** verify in principle (chains rooted at the
-  invoked URL, its Collection or the Space) but are untested here, and the
-  delegation proof suite the client signs with (`eddsa-jcs-2022`) is not yet
-  configured on the verifier.
 - **No replay protection.** A captured signed request can be replayed until
   its `expires` passes.
 - **`expectedHost` is the request's own `Host` header**, so it constrains
@@ -366,8 +399,10 @@ response deliberately says only `404`.
 - **Collection and Space listings are read whole** before paging; fine for
   the number of collections a wallet holds, not for thousands.
 - **Resource listings `HEAD` each object** for its content type and stamps.
+- **Export is bounded by the gateway's response size** (4 MB of archive);
+  no provenance is signed or verified.
 - Optional profiles not implemented: chunked resources, quotas, backends,
-  linksets, query, export/import.
+  linksets, query.
 
 ## Resources
 

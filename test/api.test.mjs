@@ -850,3 +850,159 @@ test("a delegated capability is refused for an action it does not allow, and wit
   assert.equal(bare.status, 404);
   assert.ok(!objectKeys().some((key) => key.startsWith("keyring/")));
 });
+
+// --- export and import ---------------------------------------------------------
+
+import { readSpaceArchive } from "@interop/space-archive";
+
+const SPACE_B = "dcc-was-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b";
+
+// A Space with two collections (one with metadata and a policy, one implicit),
+// three resources (JSON and binary, one with an annotation and a policy) and
+// a Space policy.
+async function seedExportable(spaceId) {
+  await seedObject(fakes, spaceId, "meta/notes.json", {
+    id: "notes", type: ["Collection"], name: "Notes", createdAt: "2026-01-02T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z",
+  });
+  await seedObject(fakes, spaceId, "policies/notes.json", { type: "PublicCanRead" });
+  await seedObject(fakes, spaceId, "collections/notes/one", { v: 1 }, "application/json", { "created-at": "2026-01-03T00:00:00.000Z", "key-epoch": "e1" });
+  await seedObject(fakes, spaceId, "meta/notes/one.json", { custom: { name: "First" }, createdAt: "2026-01-03T00:00:00.000Z", updatedAt: "2026-01-03T00:00:00.000Z" });
+  await seedObject(fakes, spaceId, "policies/notes/one.json", { type: "PublicCanRead" });
+  await seedObject(fakes, spaceId, "collections/notes/two.json", { v: 2 }, "application/json");
+  await seedObject(fakes, spaceId, "collections/pics/a.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]), "image/png");
+  await seedObject(fakes, spaceId, "policies/space.json", { type: "PublicCanRead" });
+}
+
+async function archiveEntries(bytes) {
+  const archive = await readSpaceArchive(new Uint8Array(bytes));
+  const entries = new Map();
+  for await (const entry of archive.entries) {
+    entries.set(entry.name, entry.type === "file" ? Buffer.from(await entry.bytes()) : null);
+  }
+  await archive.close();
+  return { archive, entries };
+}
+
+test("POST /space/{s}/export answers the Space as a Space archive", async () => {
+  await seedExportable(SPACE);
+  const res = await invoke({ method: "POST", path: `/space/${SPACE}/export` });
+  assert.equal(res.status, 200, res.body);
+  assert.equal(res.headers["content-type"], "application/x-tar");
+  assert.ok(res.isBase64Encoded);
+  const bytes = Buffer.from(res.body, "base64");
+  const { archive, entries } = await archiveEntries(bytes);
+  assert.equal(archive.spaceId, SPACE);
+  assert.equal(archive.service.url, `${BASE}/`);
+  assert.ok(archive.service.specs["https://w3id.org/pws"][0].features.includes("export"));
+  const names = [...entries.keys()];
+  const dir = `space/${SPACE}/`;
+  assert.ok(names.includes(`${dir}.space.meta.${SPACE}.json`));
+  assert.ok(names.includes(`${dir}.space.policy.json`));
+  assert.ok(names.includes(`${dir}notes/.collection.meta.notes.json`));
+  assert.ok(names.includes(`${dir}notes/.collection.policy.json`));
+  assert.ok(names.includes(`${dir}notes/r.one.application%2Fjson.json`));
+  assert.ok(names.includes(`${dir}notes/.meta.one.json`));
+  assert.ok(names.includes(`${dir}notes/.r.one.policy.json`));
+  assert.ok(names.includes(`${dir}notes/r.two%2Ejson.application%2Fjson.json`));
+  // The implicit collection is exported with a synthesized metadata object
+  assert.ok(names.includes(`${dir}pics/.collection.meta.pics.json`));
+  assert.ok(names.includes(`${dir}pics/r.a%2Epng.image%2Fpng.png`));
+  assert.deepEqual(JSON.parse(entries.get(`${dir}notes/r.one.application%2Fjson.json`).toString()), { v: 1 });
+  assert.deepEqual([...entries.get(`${dir}pics/r.a%2Epng.image%2Fpng.png`)], [0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]);
+  const meta = JSON.parse(entries.get(`${dir}.space.meta.${SPACE}.json`).toString());
+  assert.equal(meta.id, SPACE);
+  assert.equal(meta.name, "Test Space");
+  assert.equal(meta.url, undefined);
+  const sidecar = JSON.parse(entries.get(`${dir}notes/.meta.one.json`).toString());
+  assert.equal(sidecar.contentType, "application/json");
+  assert.equal(sidecar.epoch, "e1");
+  assert.deepEqual(sidecar.custom, { name: "First" });
+  // An unchanged Space exports byte-identical archives
+  const again = await invoke({ method: "POST", path: `/space/${SPACE}/export` });
+  assert.equal(again.body, res.body);
+});
+
+test("export needs a capability: unsigned and strangers get 404, a delegated POST is allowed", async () => {
+  await seedExportable(SPACE);
+  assert.equal((await invoke({ method: "POST", path: `/space/${SPACE}/export`, signer: null })).status, 404);
+  assert.equal((await invoke({ method: "POST", path: `/space/${SPACE}/export`, signer: strangerKey })).status, 404);
+  const capability = await delegateSpace(EddsaJcs2022, ["POST"]);
+  const delegated = await invoke({ method: "POST", path: `/space/${SPACE}/export`, signer: strangerKey, capability });
+  assert.equal(delegated.status, 200, delegated.body);
+});
+
+test("POST /space/{s}/import merges an archive, skips what is held, and reports counts", async () => {
+  await seedExportable(SPACE);
+  const exported = await invoke({ method: "POST", path: `/space/${SPACE}/export` });
+  const archive = Buffer.from(exported.body, "base64");
+
+  await seedSpace(fakes, { spaceId: SPACE_B, name: "Other" });
+  const imported = await invoke({ method: "POST", path: `/space/${SPACE_B}/import`, body: archive, contentType: "application/x-tar" });
+  assert.equal(imported.status, 200, imported.body);
+  assert.deepEqual(imported.json, {
+    collectionsCreated: 2,
+    collectionsSkipped: 0,
+    resourcesCreated: 3,
+    resourcesSkipped: 0,
+    policiesCreated: 3,
+    policiesSkipped: 0,
+    spaceMetadata: "restored",
+    provenance: { verified: 0, unattested: 6, proofInvalid: 0, contentMismatch: 0, unknownSigner: 0 },
+  });
+  // The data landed and reads back through the API
+  const one = await invoke({ path: `/space/${SPACE_B}/notes/one` });
+  assert.deepEqual(one.json, { v: 1 });
+  const oneMeta = await invoke({ path: `/space/${SPACE_B}/notes/one/meta` });
+  assert.deepEqual(oneMeta.json.custom, { name: "First" });
+  assert.equal(oneMeta.json.epoch, "e1");
+  assert.equal(oneMeta.json.createdBy, undefined);
+  const pic = await invoke({ path: `/space/${SPACE_B}/pics/a.png` });
+  assert.equal(pic.status, 200);
+  assert.ok(fakes.s3.keys(SPACE_B).includes("policies/notes/one.json"));
+  // The name was restored and mirrored
+  assert.equal((await invoke({ path: `/space/${SPACE_B}/meta` })).json.name, "Test Space");
+  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE_B}`).name.S, "Test Space");
+
+  // A second import changes nothing
+  const again = await invoke({ method: "POST", path: `/space/${SPACE_B}/import`, body: archive, contentType: "application/x-tar" });
+  assert.equal(again.status, 200);
+  assert.equal(again.json.collectionsCreated, 0);
+  assert.equal(again.json.collectionsSkipped, 2);
+  assert.equal(again.json.resourcesCreated, 0);
+  assert.equal(again.json.resourcesSkipped, 3);
+  assert.equal(again.json.policiesCreated, 0);
+  assert.equal(again.json.policiesSkipped, 3);
+});
+
+test("import under a delegated capability leaves the Space Metadata alone; a type mismatch is refused", async () => {
+  await seedExportable(SPACE);
+  const archive = Buffer.from((await invoke({ method: "POST", path: `/space/${SPACE}/export` })).body, "base64");
+
+  await seedSpace(fakes, { spaceId: SPACE_B, name: "Other" });
+  // Delegated by the controller of B, which is the same key in these tests
+  const client = new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: controllerKey.signer() });
+  const capability = await client.delegate({
+    capability: rootCapabilityId(`${BASE}/space/${SPACE_B}/`),
+    controller: strangerKey.controller,
+    invocationTarget: `${BASE}/space/${SPACE_B}/`,
+    allowedActions: ["POST"],
+    expires: new Date(Date.now() + 3600 * 1000),
+  });
+  const delegated = await invoke({ method: "POST", path: `/space/${SPACE_B}/import`, body: archive, contentType: "application/x-tar", signer: strangerKey, capability });
+  assert.equal(delegated.status, 200, delegated.body);
+  assert.equal(delegated.json.spaceMetadata, "skipped");
+  assert.equal((await invoke({ path: `/space/${SPACE_B}/meta` })).json.name, "Other");
+
+  const batch = "dcc-was-0c0c0c0c-0c0c-4c0c-8c0c-0c0c0c0c0c0c";
+  await seedSpace(fakes, { spaceId: batch, type: ["BatchSpace", "Space"] });
+  const refused = await invoke({ method: "POST", path: `/space/${batch}/import`, body: archive, contentType: "application/x-tar" });
+  assert.equal(refused.status, 400);
+  assert.equal(refused.json.type, "https://w3id.org/pws#invalid-import");
+  assert.ok(!fakes.s3.keys(batch).some((key) => key.startsWith("collections/")));
+
+  // A body that is not an archive, and a missing body
+  const junk = await invoke({ method: "POST", path: `/space/${SPACE_B}/import`, body: Buffer.from("not a tar"), contentType: "application/x-tar" });
+  assert.equal(junk.status, 400);
+  const empty = await invoke({ method: "POST", path: `/space/${SPACE_B}/import` });
+  assert.equal(empty.status, 400);
+});
