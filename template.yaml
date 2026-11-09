@@ -588,6 +588,105 @@ Resources:
         Banner:
           - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
 
+  # POST /space/{s}/export -- the Space as a Space archive (the spec's Export
+  # Space operation; the @interop/space-archive codec is bundled).
+  SpaceExportFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/export
+      Handler: app.lambdaHandler
+      MemorySize: 512
+      # Reads every object of the Space
+      Timeout: 60
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*
+                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Export:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/export
+            Method: post
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2022"
+        Format: "esm"
+        Platform: "node"
+        External:
+          - "@aws-sdk/*"
+          - "was-lib/*"
+        OutExtension:
+          - .js=.mjs
+        EntryPoints:
+          - app.mjs
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
+  # POST /space/{s}/import -- merges a Space archive into the Space (the
+  # spec's Import Space operation).
+  SpaceImportFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/import
+      Handler: app.lambdaHandler
+      MemorySize: 512
+      # Writes every object the archive carries that the Space lacks
+      Timeout: 60
+      Environment:
+        Variables:
+          SPACES_TABLE_NAME: !Ref WasSpacesTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*
+                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-was-*/policies/*
+            # The restored name is mirrored to the registry, as Update Space does
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt WasSpacesTable.Arn
+      Events:
+        Import:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/import
+            Method: post
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2022"
+        Format: "esm"
+        Platform: "node"
+        External:
+          - "@aws-sdk/*"
+          - "was-lib/*"
+        OutExtension:
+          - .js=.mjs
+        EntryPoints:
+          - app.mjs
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
   # /space/{s}/policy
   SpacePolicyGetFn:
     Type: AWS::Serverless::Function
