@@ -313,9 +313,13 @@ Two operations exist for a wallet to move an account onto a `did:webvh`
 
 - **Promotion.** `PUT /space/{s}/meta` with a `did:webvh` as `controller`,
   on a Space whose controller is a `did:key`, is accepted when the DID's
-  current document lists the invoking key under `capabilityInvocation`; the
-  registry row follows. From then on only keys in that document invoke. Any
-  other controller change is refused (`controller-mismatch`).
+  current document lists the invoking key under `capabilityInvocation` or
+  `capabilityDelegation` (wallet-core's genesis hands the account's Spaces
+  over with its bootstrap key, which the document lists for delegation
+  only, before any invocation key exists); the registry row follows. From
+  then on only keys in that document invoke. A key the document does not
+  name cannot file a Space under the DID. Any other controller change is
+  refused (`controller-mismatch`).
 - **Unlock Spaces.** `PUT /space/{id}/meta` on a Space the registry does not
   hold provisions it, without a coupon, when `id` is was-client's
   `deriveSpaceId` over the signing `did:key` (the unpadded base64url of its
@@ -600,7 +604,8 @@ npm test                          # test/api.test.mjs
 gateway's route table ([test/routes.mjs](test/routes.mjs)), the real
 authorizer, and the endpoint function it reaches, with S3 and DynamoDB
 faked ([test/fakes.mjs](test/fakes.mjs), including S3's conditional writes
-and paged listings). Every request is signed by
+and paged listings, and DynamoDB's refusal of a bare reserved word in an
+expression). Every request is signed by
 [test/harness.mjs](test/harness.mjs) the way `@interop/was-client` signs it —
 an invocation of the request URL's root capability with a `Digest` over the
 body — and delivered the way API Gateway delivers it (path decoded, path

@@ -8,6 +8,7 @@
 // imports below would otherwise reach jsonld before it is initialized.
 import "@interop/http-client";
 import { test, beforeEach } from "node:test";
+import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 
 import { installFakes } from "./fakes.mjs";
@@ -770,6 +771,26 @@ test("PUT /space/{s}/meta promotes a did:key controller to a did:webvh that list
   });
   assert.equal(again.status, 400);
   assert.equal(again.json.type, "https://w3id.org/pws#controller-mismatch");
+});
+
+test("PUT /space/{s}/meta promotes to a did:webvh that lists the invoking key for delegation only", async () => {
+  // wallet-core's genesis: the bootstrap (ladder) key is published under
+  // capabilityDelegation alone, and hands the account's Spaces over before
+  // any invocation key exists. The first live signup failed here.
+  const account = await mintWebvh({ path: SPACE, relations: ["capabilityDelegation"] });
+  await seedWebvhLog(fakes, SPACE, account.jsonl);
+  const current = await invoke({ path: `/space/${SPACE}/meta` });
+  const promoted = await invoke({
+    method: "PUT",
+    path: `/space/${SPACE}/meta`,
+    json: { name: "Test Space", controller: account.did },
+    headers: { "if-match": current.headers.etag },
+  });
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.json));
+  assert.equal(promoted.json.controller, account.did);
+  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE}`).did.S, account.did);
+  // The did:key form no longer invokes
+  assert.equal((await invoke({ path: `/space/${SPACE}/meta` })).status, 404);
 });
 
 test("PUT /space/{s}/meta refuses a promotion to a did:webvh that does not list the invoking key", async () => {
@@ -1951,6 +1972,32 @@ test("a whole-registry sweep recounts the coupon-less Spaces and backfills provi
   assert.ok(!(COUNTER_KEY in report));
   const spaces = await invoke({ path: "/spaces/" });
   assert.ok(spaces.json.items.every((item) => item.id !== COUNTER_KEY));
+});
+
+test("the fake table refuses a bare reserved word in an expression, as DynamoDB does", async () => {
+  // The SDK copy the handlers use, from the repo root (as test/fakes.mjs resolves it)
+  const { ScanCommand, UpdateItemCommand } = createRequire(new URL("../package.json", import.meta.url))("@aws-sdk/client-dynamodb");
+  // `provisioning` is reserved: the first live sweep failed on exactly this
+  await assert.rejects(
+    fakes.dynamo.send(new ScanCommand({ TableName: "was-spaces", ProjectionExpression: "spaceURL, provisioning" })),
+    { name: "ValidationException", message: /reserved keyword: provisioning/ }
+  );
+  await assert.rejects(
+    fakes.dynamo.send(
+      new UpdateItemCommand({
+        TableName: "was-spaces",
+        Key: { spaceURL: { S: `${BASE}/space/${SPACE}` } },
+        UpdateExpression: "SET provisioning = :kind",
+        ExpressionAttributeValues: { ":kind": { S: "coupon" } },
+      })
+    ),
+    { name: "ValidationException" }
+  );
+  // Aliased, the same requests go through
+  const scanned = await fakes.dynamo.send(
+    new ScanCommand({ TableName: "was-spaces", ProjectionExpression: "spaceURL, #provisioning", ExpressionAttributeNames: { "#provisioning": "provisioning" } })
+  );
+  assert.ok(Array.isArray(scanned.Items));
 });
 
 test("the quota watch publishes the bucket and coupon-less counts", async () => {

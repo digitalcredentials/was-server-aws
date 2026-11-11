@@ -26,8 +26,14 @@ async function registeredSpaces() {
   const rows = [];
   let cursor;
   do {
+    // `provisioning` is a DynamoDB reserved word, so it goes by alias
     const out = await dynamo.send(
-      new ScanCommand({ TableName: SPACES_TABLE, ProjectionExpression: "spaceURL, provisioning", ...(cursor && { ExclusiveStartKey: cursor }) })
+      new ScanCommand({
+        TableName: SPACES_TABLE,
+        ProjectionExpression: "spaceURL, #provisioning",
+        ExpressionAttributeNames: { "#provisioning": "provisioning" },
+        ...(cursor && { ExclusiveStartKey: cursor }),
+      })
     );
     for (const row of out.Items ?? []) {
       if (!isCounterRow(row) && row.spaceURL?.S?.includes("/space/")) {
@@ -55,7 +61,8 @@ async function reconcileCouponless(rows) {
         new UpdateItemCommand({
           TableName: SPACES_TABLE,
           Key: { spaceURL: row.spaceURL },
-          UpdateExpression: "SET provisioning = :kind",
+          UpdateExpression: "SET #provisioning = :kind",
+          ExpressionAttributeNames: { "#provisioning": "provisioning" },
           ExpressionAttributeValues: { ":kind": { S: provisioningOf(row) } },
         })
       );
