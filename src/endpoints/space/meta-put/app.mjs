@@ -31,7 +31,8 @@ import { releaseCouponlessSlot, reserveCouponlessSlot } from "was-lib/quota.mjs"
 //   - Promoting the controller. A body naming a did:webvh as controller,
 //     where the Space's controller is a did:key, is accepted when the
 //     did:webvh's current document lists the invoking key under
-//     capabilityInvocation. From then on only keys in that document may
+//     capabilityInvocation or capabilityDelegation (wallet-core's bootstrap
+//     key is delegation-only). From then on only keys in that document may
 //     invoke. Any other controller change is refused.
 
 const dynamo = new DynamoDBClient({});

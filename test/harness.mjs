@@ -213,9 +213,11 @@ export function asWebvh(key, did) {
   };
 }
 
-// Mints a did:webvh whose document lists `key` under every relationship, with
-// the log at {domain}/{path}. `keys` may add further Multikeys to the document.
-export async function mintWebvh({ key = controllerKey, domain = "id.test", path, keys = [] }) {
+// Mints a did:webvh whose document lists `key` under every relationship (or
+// only the `relations` given), with the log at {domain}/{path}. `keys` may
+// add further Multikeys to the document.
+export const ALL_RELATIONS = ["authentication", "assertionMethod", "capabilityInvocation", "capabilityDelegation"];
+export async function mintWebvh({ key = controllerKey, domain = "id.test", path, keys = [], relations = ALL_RELATIONS }) {
   const multibase = key.fingerprint();
   const members = [key, ...keys].map((k) => k.fingerprint());
   const { did, doc, log } = await createDID({
@@ -226,10 +228,7 @@ export async function mintWebvh({ key = controllerKey, domain = "id.test", path,
     verificationMethods: members.map((publicKeyMultibase) => ({ type: "Multikey", publicKeyMultibase })),
     vmIdFragment: "multibase",
     portable: true,
-    authentication: members.map((m) => `#${m}`),
-    assertionMethod: members.map((m) => `#${m}`),
-    capabilityInvocation: members.map((m) => `#${m}`),
-    capabilityDelegation: members.map((m) => `#${m}`),
+    ...Object.fromEntries(relations.map((relation) => [relation, members.map((m) => `#${m}`)])),
   });
   return { did, doc, log, jsonl: logToJsonlString(log), keyId: `${did}#${multibase}` };
 }
