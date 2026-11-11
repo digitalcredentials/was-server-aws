@@ -198,7 +198,7 @@ async function readSpaceMetadata(spaceId) {
 const typesOf = (meta) => asList(meta?.type);
 const isDelegatedClientsSpace = (meta) => typesOf(meta).includes("AuxiliarySpace") && typesOf(meta).includes("DelegatedClientsSpace");
 
-const resolveDocument = (did) => resolveWebvhDocument(did, { driver: webvhDriver });
+const resolveDocument = (did, options = {}) => resolveWebvhDocument(did, { driver: webvhDriver, ...options });
 
 // Predicate 6: a replica pull by a server the annex document points at.
 async function replicaPullAdmitted({ capability, controllers, clientAnnexDid, spaceId, accountSpaceId, parentIsRoot, serverUrl }) {
@@ -355,6 +355,8 @@ const REFUSED_SHAPE =
 export function clientAnnexChainInspector({ serverUrl, invocation }) {
   return async ({ capabilityChain, capabilityChainMeta }) => {
     const docs = new Map();
+    // The DIDs re-resolved fresh once in this inspection
+    const refreshed = new Set();
     const ladderLinks = [];
     let transientAnnexSigned = false;
     for (let index = 1; index < capabilityChain.length; index++) {
@@ -384,15 +386,31 @@ export function clientAnnexChainInspector({ serverUrl, invocation }) {
         continue;
       }
       ladderLinks.push(capability);
-      const admitted = await ladderDelegationAdmitted({
-        capability,
-        doc,
-        logLocation,
-        parent: capabilityChain[index - 1],
-        parentMeta: capabilityChainMeta[index - 1],
-        parentIsRoot: index === 1,
-        serverUrl,
-      });
+      const admittedBy = (document) =>
+        ladderDelegationAdmitted({
+          capability,
+          doc: document,
+          logLocation,
+          parent: capabilityChain[index - 1],
+          parentMeta: capabilityChainMeta[index - 1],
+          parentIsRoot: index === 1,
+          serverUrl,
+        });
+      let admitted = await admittedBy(doc);
+      if (!admitted && !refreshed.has(did)) {
+        // The cached document may be behind the log: a transient recovery
+        // re-points the account's client-annex entry to a fresh generation
+        // and invokes under that generation in the same second. One fresh
+        // resolution before refusing, as zcap.mjs does for a key the cached
+        // document does not list.
+        refreshed.add(did);
+        const current = await resolveDocument(did, { fresh: true });
+        if (current) {
+          doc = current;
+          docs.set(did, current);
+          admitted = await admittedBy(current);
+        }
+      }
       if (!admitted) {
         return { valid: false, error: new Error(REFUSED_SHAPE) };
       }

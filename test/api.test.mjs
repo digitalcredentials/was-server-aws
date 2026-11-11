@@ -1780,7 +1780,7 @@ async function mintAccount({ spaceId, key, ladder, transient, services }) {
     capabilityDelegation: [`#${k}`, ...(l ? [`#${l}`] : []), ...(t ? [`#${t}`] : [])],
     ...(services && { services }),
   });
-  return { did, jsonl: logToJsonlString(log) };
+  return { did, log, jsonl: logToJsonlString(log) };
 }
 
 // The account Space (controlled by the account DID, whose ladder VM is
@@ -1873,6 +1873,52 @@ test("a ladder VM's delegation is admitted in the clause's shapes and refused ou
   const bridge = await ladderDelegate(account, { controller: strangerKey.controller, invocationTarget: `${ACCT_URL}id/did.jsonl`, allowedActions: ["PUT"] });
   const log = await invoke({ method: "PUT", path: `/space/${ACCT}/id/did.jsonl`, body: account.jsonl, contentType: "text/jsonl", signer: strangerKey, capability: bridge });
   assert.equal(log.status, 204, log.body);
+});
+
+test("a generation grant to a freshly re-pointed annex is admitted while the cached document still names the previous one", async () => {
+  // A transient recovery mints a fresh annex generation, re-points the
+  // account document at it, and invokes under it in the same second: the
+  // authorizer's cached copy of the document is one entry behind.
+  const { account, annex } = await seedAnnexAccount();
+  const path = `/space/${ACCT}/notes/one`;
+  await invoke({ method: "PUT", path, json: { v: 1 }, signer: asWebvh(controllerKey, account.did) });
+  // The first grant warms the cache with the document naming the first annex
+  const first = await ladderDelegate(account, { controller: annex.did, invocationTarget: ACCT_URL, allowedActions: WAS_ACTIONS });
+  assert.equal((await invoke({ path, signer: asWebvh(annexKey, annex.did), capability: first })).status, 200);
+
+  // The fresh generation (a second annex DID) and the re-pointing entry, both
+  // written to the logs without touching the cache
+  const NEXT_SPACE = "dcc-was-0000aaaa-0000-4000-8000-0000000000af";
+  const next = await mintAccount({ spaceId: NEXT_SPACE, key: annexKey, transient: transientKey });
+  await seedSpace(fakes, { spaceId: NEXT_SPACE, controller: account.did, type: ["AuxiliarySpace", "DelegatedClientsSpace", "Space"] });
+  await seedObject(fakes, bucketOf(NEXT_SPACE), "collections/id/did.jsonl", next.jsonl, "text/jsonl");
+  const k = controllerKey.fingerprint();
+  const l = ladderKey.fingerprint();
+  const repointed = await updateDID({
+    log: account.log,
+    signer: signerFromDidKeySigner(controllerKey.signer()),
+    updateKeys: [`did:key:${k}`],
+    verificationMethods: [k, l].map((publicKeyMultibase) => ({ type: "Multikey", publicKeyMultibase })),
+    vmIdFragment: "multibase",
+    authentication: [`#${k}`],
+    assertionMethod: [`#${k}`, `#${l}`],
+    capabilityInvocation: [`#${k}`],
+    capabilityDelegation: [`#${k}`, `#${l}`],
+    services: [{ id: "#delegated-clients", type: "https://w3id.org/byoe#DelegatedClients", serviceEndpoint: next.did }],
+  });
+  await seedObject(fakes, bucketOf(ACCT), "collections/id/did.jsonl", logToJsonlString(repointed.log), "text/jsonl");
+
+  // The new generation's grant, invoked by its key: admitted after one fresh resolution
+  const second = await ladderDelegate(account, { controller: next.did, invocationTarget: ACCT_URL, allowedActions: WAS_ACTIONS });
+  const viaNext = await invoke({ path, signer: asWebvh(annexKey, next.did), capability: second });
+  assert.equal(viaNext.status, 200, viaNext.body);
+  // A grant to an annex no version of the document names is still refused
+  const OTHER_SPACE = "dcc-was-0000aaaa-0000-4000-8000-0000000000b0";
+  const other = await mintAccount({ spaceId: OTHER_SPACE, key: annexKey, transient: transientKey });
+  await seedSpace(fakes, { spaceId: OTHER_SPACE, controller: account.did, type: ["AuxiliarySpace", "DelegatedClientsSpace", "Space"] });
+  await seedObject(fakes, bucketOf(OTHER_SPACE), "collections/id/did.jsonl", other.jsonl, "text/jsonl");
+  const toOther = await ladderDelegate(account, { controller: other.did, invocationTarget: ACCT_URL, allowedActions: WAS_ACTIONS });
+  assert.equal((await invoke({ path, signer: asWebvh(annexKey, other.did), capability: toOther })).status, 404);
 });
 
 test("a delegation an enrolled client signs is outside the clause", async () => {

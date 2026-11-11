@@ -285,7 +285,11 @@ under `capabilityInvocation` (or `capabilityDelegation`, for a delegation's
 proof) in the current document, whose `controller` is then the invoker the
 root capability is checked against. Revoking a key is one log entry. The
 resolved document is cached for `WEBVH_CACHE_SECONDS` (default 30), which
-is the window a revoked key keeps working.
+is the window a revoked key keeps working. A key the cached document does
+not list, and a ladder delegation the clause refuses against it, are each
+judged once more against a fresh resolution before the refusal stands: a
+credential added a moment ago works at once, and so does the generation a
+transient recovery has just re-pointed the account's client-annex entry to.
 
 Where a log comes from (`was-lib/webvh.mjs`): a DID whose domain is the
 deployment's `IdDomain` parameter (default `id.lcw-sandbox.org`) and whose
