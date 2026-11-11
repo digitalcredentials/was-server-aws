@@ -35,6 +35,8 @@ to the canonical one.
 | GET | `/space/{s}/{c}/meta` | `CollectionMetaGetFn` | Collection Metadata (configuration + `custom`/`epoch`) |
 | PUT | `/space/{s}/{c}/meta` | `CollectionMetaPutFn` | replace it (`If-None-Match: *` creates) |
 | GET / PUT / DELETE | `/space/{s}/{c}/policy` | `CollectionPolicy{Get,Put,Delete}Fn` | the Collection's policy |
+| GET, HEAD | `/space/{s}/{c}/meta/log` | `CollectionLogGetFn` | the Collection's governing history log (JSON Lines) |
+| PUT | `/space/{s}/{c}/meta/log` | `CollectionLogPutFn` | declare it (`If-None-Match: *`) or append one entry (`If-Match`) |
 | GET, HEAD | `/space/{s}/{c}/{r}` | `ResourceGetFn` | Resource content |
 | PUT | `/space/{s}/{c}/{r}` | `ResourcePutFn` | create or replace it |
 | DELETE | `/space/{s}/{c}/{r}` | `ResourceDeleteFn` | delete it (permanently) |
@@ -100,8 +102,8 @@ An archive holds the Space Metadata object and policy, and each Collection's
 metadata, policy, Resources (content as stored, so encrypted collections stay
 encrypted, with a metadata sidecar each) and Resource policies, plus this
 server's service description as `service.json`. What this server does not keep
-is absent: no tombstones, chunks, governing history logs, revocation records or
-provenance statements. An unchanged Space exports byte-identical archives.
+is absent: no tombstones, chunks, revocation records or provenance
+statements; a Collection's governing history log travels as its own file. An unchanged Space exports byte-identical archives.
 
 Import adds what the Space lacks and skips what it holds, so a second import
 of the same archive changes nothing: the Space's `name` is restored under the
@@ -118,6 +120,45 @@ The archive is built in memory and returned as one response. API Gateway
 carries at most 6 MB after base64 encoding, so an archive over 4 MB is refused
 with `413 payload-too-large`; larger Spaces will need a presigned-URL
 hand-off.
+
+### Governing history logs
+
+A Collection's `encryption` descriptor can be governed by a client-written,
+append-only history log at `/space/{s}/{c}/meta/log` (PWS v0.5, Collection
+Governing History Log; the log format is PWS-EC's resource log profile).
+This is how the reference client and FreeWallet provision an encrypted
+Collection: the container is created bare, then a guarded `PUT` of the
+log's genesis entry (`If-None-Match: *`) declares the Collection governed
+and installs its first key epoch. From then on the served `encryption`
+member is derived from the log's head entry, its `state` less the
+`revisions` slot, with `history` (`method`, the log's URL) stamped on, and
+`revisions` is served from the slot. The stored metadata object never holds
+the derived members; a `PUT` of the metadata that restates the served
+descriptor passes, one that changes it is `encryption-history-log-governed`
+(409), and declaring governance on a Collection whose metadata already
+holds a client-written descriptor is `encryption-immutable` (409).
+
+An append sends the stored log verbatim plus exactly one new line under
+`If-Match`. The server checks the line contract (JSON objects with an
+object `state`), that the body fast-forwards the stored log (a stale or
+rewritten body is 412, zero or several new lines 400), the head state's
+shape and, against the prior head, the epoch invariants: `epochs` is
+append-only, `currentEpoch` never moves backwards, the blinding key is
+permanent, `scheme` and `version` are set-once (`epochs.mjs`). It verifies
+nothing inside an entry: proofs and hash links are the verifying reader's
+business. A log write also rewrites the metadata object's `updatedAt`, so
+the metadata ETag advances with the derived member. The log is stored as
+`meta/{c}.log`, versioned by its own ETag, excluded from listings, deleted
+with its Collection, and carried by export and import as its own archive
+file. The same shape and invariant checks apply to a descriptor written
+directly on the metadata object (the `encryption` feature token).
+
+The service description advertises `governed-history-logs` under the
+PWS-EC entry (`https://w3id.org/pws/encrypted-collections`), lists the
+authorization profile entry, and names the core feature tokens as the
+specification's conformance table spells them (`listing`,
+`collection-management`, `space-management`, `metadata`, `policy`,
+`export`, `encryption`).
 
 ### did:webvh controllers
 

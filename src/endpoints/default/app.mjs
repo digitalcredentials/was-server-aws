@@ -8,7 +8,7 @@ import { methodNotAllowed, notFound } from "was-lib/problems.mjs";
 //   - the bare Space URL (/space/{s}, which has no route of its own) is a
 //     308 to its canonical trailing-slash form;
 //   - a reserved segment this server does not implement (linkset, quotas,
-//     meta/log, chunks, ...) is the spec's 405;
+//     chunks, ...) is the spec's 405 (meta/log has a route of its own);
 //   - everything else is 404.
 // Nothing here reads anything, so the function runs without the
 // authorizer and without permissions.

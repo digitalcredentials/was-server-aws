@@ -28,6 +28,7 @@ async function deleteCollection(req, { spaceId, collectionId }) {
   await deletePrefix(spaceId, KEYS.collectionMetaPrefix(collectionId));
   await deletePrefix(spaceId, KEYS.collectionPolicyPrefix(collectionId));
   await deleteObject(spaceId, KEYS.collectionMeta(collectionId));
+  await deleteObject(spaceId, KEYS.collectionLog(collectionId));
   await deleteObject(spaceId, KEYS.collectionPolicy(collectionId));
   return noContent(req, NO_STORE);
 }

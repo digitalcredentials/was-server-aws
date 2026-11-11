@@ -988,6 +988,60 @@ Resources:
             Path: /space/{space_id}/{collection_id}/meta
             Method: put
 
+  # /space/{s}/{c}/meta/log -- the Collection's governing history log, from
+  # whose head the encryption descriptor is derived (governed-history-logs).
+  CollectionLogGetFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/collection/log-get
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-was-*/policies/*
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/meta/log
+            Method: get
+        Head:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/meta/log
+            Method: head
+
+  CollectionLogPutFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/collection/log-put
+      Handler: app.lambdaHandler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/meta/*
+      Events:
+        Put:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/meta/log
+            Method: put
+
   # /space/{s}/{c}/policy
   CollectionPolicyGetFn:
     Type: AWS::Serverless::Function

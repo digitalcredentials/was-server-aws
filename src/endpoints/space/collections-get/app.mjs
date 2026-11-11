@@ -2,6 +2,7 @@ import { handler } from "was-lib/handler.mjs";
 import { json } from "was-lib/http.mjs";
 import { KEYS, getJson, listAllPrefixes, listAllKeys } from "was-lib/store.mjs";
 import { collectionUrl, spaceUrl } from "was-lib/meta.mjs";
+import { withGovernedMembers } from "was-lib/history.mjs";
 import { pageLimit, nextLink, offsetCursor, readOffsetCursor } from "was-lib/ops/listing.mjs";
 
 // GET, HEAD /space/{s}/ -- the Collections in the Space: every one with a
@@ -38,7 +39,8 @@ export const lambdaHandler = handler(
     const items = await Promise.all(
       page.map(async (collectionId) => {
         const stored = await getJson(spaceId, KEYS.collectionMeta(collectionId));
-        const doc = stored?.doc ?? {};
+        // A governed Collection's descriptor comes from its history log
+        const { doc } = await withGovernedMembers(req, spaceId, collectionId, stored?.doc ?? {});
         return {
           id: collectionId,
           url: collectionUrl(req, spaceId, collectionId),
