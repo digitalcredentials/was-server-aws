@@ -4,16 +4,22 @@ import { CreateBucketCommand, PutBucketNotificationConfigurationCommand } from "
 import { plainHandler } from "was-lib/handler.mjs";
 import { json, parseJsonBody, NO_STORE } from "was-lib/http.mjs";
 import { verifyDigest } from "was-lib/auth.mjs";
-import { s3 } from "was-lib/store.mjs";
+import { s3, bucketOf } from "was-lib/store.mjs";
 import { now, spaceUrl, typesOf, writeSpaceMeta } from "was-lib/meta.mjs";
-import { HttpProblem, invalidRequestBody, notFound } from "was-lib/problems.mjs";
+import { isReservedSpaceId, isValidSpaceId } from "was-lib/ids.mjs";
+import { HttpProblem, idConflict, invalidId, invalidRequestBody, notFound, reservedId } from "was-lib/problems.mjs";
 
 // POST /spaces/ -- provision a Space. Per the spec the request must be
 // authorized by the `controller` DID in the body: the authorizer verified
 // the invocation against the DID that signed it, and that DID must be the
 // stated controller. This server additionally requires a coupon. The id is
-// server-assigned (also the bucket name); the bucket is created with its
-// metadata object and the Space registered.
+// server-assigned (`dcc-was-{uuid}`, also the bucket name) unless the body
+// names one: a wallet built on wallet-core mints its account Space's id
+// before genesis, redeems the coupon here with that id, and genesis then
+// finds the Space in place (its provisioning step is an ensure). A client
+// id maps to its bucket through `bucketOf`, and an id already in use is a
+// conflict. The bucket is created with its metadata object and the Space
+// registered.
 //
 // The registry row (the was-spaces table, keyed by space URL without a
 // trailing slash, with a by-did index) holds authorization and lookup data
@@ -74,18 +80,50 @@ async function redeemCoupon(coupon) {
 }
 
 async function registerSpace({ url, controller, type, name, createdAt }) {
-  await dynamo.send(
-    new PutItemCommand({
-      TableName: SPACES_TABLE,
-      Item: {
-        spaceURL: { S: url },
-        did: { S: controller },
-        type: { L: type.map((entry) => ({ S: entry })) },
-        ...(name !== undefined && { name: { S: name } }),
-        CreatedAt: { S: createdAt },
-      },
-    })
-  );
+  try {
+    await dynamo.send(
+      new PutItemCommand({
+        TableName: SPACES_TABLE,
+        Item: {
+          spaceURL: { S: url },
+          did: { S: controller },
+          type: { L: type.map((entry) => ({ S: entry })) },
+          ...(name !== undefined && { name: { S: name } }),
+          CreatedAt: { S: createdAt },
+        },
+        ConditionExpression: "attribute_not_exists(spaceURL)",
+      })
+    );
+  } catch (err) {
+    if (err?.name === "ConditionalCheckFailedException") {
+      throw idConflict("A Space with this id already exists.");
+    }
+    throw err;
+  }
+}
+
+async function isRegistered(url) {
+  const { Item } = await dynamo.send(new GetItemCommand({ TableName: SPACES_TABLE, Key: { spaceURL: { S: url } } }));
+  return Boolean(Item);
+}
+
+// The id the Space gets: the client's, when the body names one it may
+// choose (a valid id form, not reserved, not in use), else a fresh
+// server-assigned one.
+async function chooseSpaceId(id) {
+  if (id === undefined) {
+    return { spaceId: `dcc-was-${randomUUID()}`, chosen: false };
+  }
+  if (typeof id !== "string" || !isValidSpaceId(id)) {
+    throw invalidId("A Space id must be a server-assigned id or 43 URL-safe characters.");
+  }
+  if (isReservedSpaceId(id)) {
+    throw reservedId(id);
+  }
+  if (await isRegistered(`${SPACE_URL_BASE}/${id}`)) {
+    throw idConflict("A Space with this id already exists.");
+  }
+  return { spaceId: id, chosen: true };
 }
 
 export const lambdaHandler = plainHandler(async (req) => {
@@ -99,9 +137,6 @@ export const lambdaHandler = plainHandler(async (req) => {
   if (typeof controller !== "string" || !controller.startsWith("did:key:")) {
     throw invalidRequestBody('"controller" must be a did:key DID.');
   }
-  if (id !== undefined) {
-    throw invalidRequestBody('Space ids are assigned by this server; omit "id".');
-  }
   if (name !== undefined && typeof name !== "string") {
     throw invalidRequestBody('"name" must be a string.');
   }
@@ -113,11 +148,14 @@ export const lambdaHandler = plainHandler(async (req) => {
   }
   verifyDigest(req);
 
+  // The id is settled before the coupon is spent, so a conflict costs
+  // nothing; two requests racing for one id are caught by the metadata
+  // object's If-None-Match and the registry row's condition below
+  const { spaceId, chosen } = await chooseSpaceId(id);
   if (!(await redeemCoupon(coupon))) {
     throw couponRequired();
   }
 
-  const spaceId = `dcc-was-${randomUUID()}`;
   const stamp = now();
   const doc = {
     id: spaceId,
@@ -128,10 +166,19 @@ export const lambdaHandler = plainHandler(async (req) => {
     createdAt: stamp,
     updatedAt: stamp,
   };
-  await s3.send(new CreateBucketCommand({ Bucket: spaceId }));
+  const bucket = bucketOf(spaceId);
+  await s3.send(new CreateBucketCommand({ Bucket: bucket }));
   // The bucket's object events feed the Collections' `changes` feeds
-  await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: spaceId, NotificationConfiguration: { EventBridgeConfiguration: {} } }));
-  const written = await writeSpaceMeta(req, spaceId, doc);
+  await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: bucket, NotificationConfiguration: { EventBridgeConfiguration: {} } }));
+  let written;
+  try {
+    written = await writeSpaceMeta(req, spaceId, doc, chosen ? { ifNoneMatch: "*" } : {});
+  } catch (err) {
+    if (err instanceof HttpProblem && err.status === 412) {
+      throw idConflict("A Space with this id already exists.");
+    }
+    throw err;
+  }
   await registerSpace({ url: `${SPACE_URL_BASE}/${spaceId}`, controller: controllerDid, type, name, createdAt: stamp });
 
   return json(req, 201, written.doc, {

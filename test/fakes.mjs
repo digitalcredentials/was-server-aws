@@ -283,6 +283,10 @@ export class FakeDynamo {
         return { Item: this.table(input.TableName).get(this.keyOf(input)) };
       case "PutItemCommand": {
         const key = Object.values(input.Item)[0].S;
+        // attribute_not_exists(<key attribute>): a conditional create
+        if (input.ConditionExpression?.startsWith("attribute_not_exists(") && this.table(input.TableName).has(key)) {
+          throw awsError("ConditionalCheckFailedException", 400);
+        }
         this.table(input.TableName).set(key, input.Item);
         return {};
       }
