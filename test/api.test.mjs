@@ -123,6 +123,37 @@ test("POST /spaces/ keeps a typed Space's type array", async () => {
   assert.equal(again.status, 403);
 });
 
+test("POST /spaces/ takes a client-chosen id (a wallet-core account Space, minted before genesis)", async () => {
+  // wallet-core's mintAccountKeySet: 43 URL-safe characters
+  const chosen = "bq0CrK85pRtRxqriiwnrAJg5smqsPaXrVs-EsEWJYTI";
+  const res = await invoke({
+    method: "POST",
+    path: "/spaces/",
+    json: { id: chosen, controller: controllerKey.controller, name: "Main Space", coupon: "open-sesame" },
+  });
+  assert.equal(res.status, 201, JSON.stringify(res.json));
+  assert.equal(res.json.id, chosen);
+  assert.equal(res.headers.location, `${BASE}/space/${chosen}/`);
+  assert.ok(fakes.s3.buckets.has(bucketOf(chosen)));
+  assert.ok(fakes.dynamo.tables["was-spaces"].has(`${BASE}/space/${chosen}`));
+  // Genesis then finds the Space in place
+  const meta = await invoke({ path: `/space/${chosen}/meta` });
+  assert.equal(meta.status, 200);
+  assert.equal(meta.json.controller, controllerKey.controller);
+  // The id is taken; the coupon is not spent on the refusal
+  fakes.dynamo.tables["was-coupons"].set("once", { coupon: { S: "once" }, usesRemaining: { N: "1" } });
+  const taken = await invoke({ method: "POST", path: "/spaces/", json: { id: chosen, controller: controllerKey.controller, coupon: "once" } });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.json.type, "https://w3id.org/pws#id-conflict");
+  assert.equal(fakes.dynamo.tables["was-coupons"].get("once").usesRemaining.N, "1");
+  // Malformed and reserved ids
+  const malformed = await invoke({ method: "POST", path: "/spaces/", json: { id: "not a space id", controller: controllerKey.controller, coupon: "once" } });
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.json.type, "https://w3id.org/pws#invalid-id");
+  const reserved = await invoke({ method: "POST", path: "/spaces/", json: { id: "server", controller: controllerKey.controller, coupon: "once" } });
+  assert.equal(reserved.status, 400); // not a valid id form on this server at all
+});
+
 test("POST /spaces/ refuses a request not signed by the stated controller", async () => {
   const res = await invoke({
     method: "POST",

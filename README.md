@@ -19,7 +19,7 @@ to the canonical one.
 | Method | Path | Function | Operation |
 | --- | --- | --- | --- |
 | GET, HEAD | `/service`, `/` | `ServiceGetFn` | the service description (discovery; no authorization) |
-| POST | `/spaces/` | `SpacesPostFn` | provision a Space (`{controller, name?, type?, coupon}`) |
+| POST | `/spaces/` | `SpacesPostFn` | provision a Space (`{controller, name?, type?, coupon, id?}`) |
 | GET | `/spaces/` | `SpacesGetFn` | list the caller's Spaces |
 | GET | `/space/{s}/` | `SpaceCollectionsGetFn` | list the Space's Collections |
 | POST | `/space/{s}/` | `CollectionCreateFn` | create a Collection (`{id?, name?, encryption?, ...}`) |
@@ -78,9 +78,14 @@ redeemed from the `was-coupons` table (optional `usesRemaining` and
 Space's type array (default `["Space"]`; the wallet marks batch spaces
 `["Space", "BatchSpace"]`); `name` is kept in the Space Metadata and mirrored
 to the registry for listings. The server assigns the id (`dcc-was-{uuid}`,
-also the bucket name), creates the bucket with `meta/space.json`, registers
-the Space, and answers `201` with `Location` and the metadata. Mint coupons
-directly:
+also the bucket name) unless the body names one: a wallet built on
+wallet-core mints its account Space's id before genesis (43 URL-safe
+characters), redeems the coupon here with that `id`, and genesis then finds
+the Space in place, since its provisioning step is an ensure. A client id
+must be a valid id form, not reserved, and not in use (`409 id-conflict`);
+its bucket is `bucketOf(id)`. Either way the server creates the bucket with
+`meta/space.json`, registers the Space, and answers `201` with `Location`
+and the metadata. Mint coupons directly:
 
 ```sh
 aws dynamodb put-item --table-name was-coupons --item \
