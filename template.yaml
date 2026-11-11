@@ -694,6 +694,11 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref WasCouponsTable
         - Statement:
+            # A client-chosen id is checked against the registry before the
+            # coupon is spent
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt WasSpacesTable.Arn
             - Effect: Allow
               Action:
                 - s3:CreateBucket
