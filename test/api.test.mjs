@@ -905,7 +905,7 @@ async function delegateSpace(SuiteClass, allowedActions = ["GET", "PUT", "DELETE
   });
 }
 
-test("a delegated capability authorizes Resource operations under either proof suite, and container operations stay root-only", async () => {
+test("a delegated capability authorizes Resource and Collection operations under either proof suite, and the Space stays root-only", async () => {
   for (const SuiteClass of [EddsaJcs2022, Ed25519Signature2020]) {
     const capability = await delegateSpace(SuiteClass);
     const path = `/space/${SPACE}/keyring/${SuiteClass.name}`;
@@ -918,11 +918,42 @@ test("a delegated capability authorizes Resource operations under either proof s
     const removed = await invoke({ method: "DELETE", path, signer: strangerKey, capability });
     assert.equal(removed.status, 204, `${SuiteClass.name}: ${removed.body}`);
 
-    // The Space itself, its metadata and a Collection are container
-    // operations: a delegated capability is refused with a 404
+    // A Space-subtree grant creates and configures a Collection (wallet-core's
+    // transient clients mint their annex generation this way)
+    const collectionId = `gen-${SuiteClass.name}`;
+    const collection = await invoke({
+      method: "PUT",
+      path: `/space/${SPACE}/${collectionId}/meta`,
+      json: { id: collectionId, name: collectionId },
+      headers: { "if-none-match": "*" },
+      signer: strangerKey,
+      capability,
+    });
+    assert.equal(collection.status, 201, `${SuiteClass.name}: ${collection.body}`);
+    assert.equal(collection.json.createdBy, strangerKey.controller);
+    const renamed = await invoke({
+      method: "PUT",
+      path: `/space/${SPACE}/${collectionId}/meta`,
+      json: { id: collectionId, name: "Renamed" },
+      headers: { "if-match": collection.headers.etag },
+      signer: strangerKey,
+      capability,
+    });
+    assert.equal(renamed.status, 200, `${SuiteClass.name}: ${renamed.body}`);
+
+    // The Space itself and its metadata are container operations: a
+    // delegated capability is refused with a 404; so is deleting a Collection
     const spaceGone = await invoke({ method: "DELETE", path: `/space/${SPACE}/`, signer: strangerKey, capability });
     assert.equal(spaceGone.status, 404);
     assert.ok(fakes.s3.buckets.has(bucketOf(SPACE)));
+    const spaceMeta = await invoke({
+      method: "PUT",
+      path: `/space/${SPACE}/meta`,
+      json: { name: "Taken" },
+      signer: strangerKey,
+      capability,
+    });
+    assert.equal(spaceMeta.status, 404);
     const collectionGone = await invoke({ method: "DELETE", path: `/space/${SPACE}/keyring/`, signer: strangerKey, capability });
     assert.equal(collectionGone.status, 404);
   }

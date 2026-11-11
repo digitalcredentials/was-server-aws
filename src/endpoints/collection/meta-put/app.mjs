@@ -11,7 +11,12 @@ const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // PUT /space/{s}/{c}/meta -- a full replacement of the writable members
 // (configuration and the custom/epoch annotation), under If-Match /
 // If-None-Match; with If-None-Match: * it creates the Collection (201).
-// Root capability only (the container rule). An `encryption` descriptor is
+// Any chain that covers the URL may do it, as on the reference server: a
+// delegated client holding a Space-subtree grant creates the Collections
+// it writes (wallet-core's transient clients mint their annex generation
+// this way, and create `dids` or `Trash` in the account Space). The
+// container rule keeps the Space's own metadata and deletion root-only
+// (space/meta-put, space/delete). An `encryption` descriptor is
 // creation-only and version-monotonic across updates (epochs.mjs); on a
 // Collection governed by its history log the member is read-only here (a
 // restatement of the derived value passes, a change is refused), and the
@@ -52,5 +57,5 @@ export const lambdaHandler = handler(
     const served = current?.governed ? { ...written.doc, encryption: stored.encryption, ...(stored.revisions && { revisions: stored.revisions }) } : written.doc;
     return json(req, existed ? 200 : 201, served, { ...NO_STORE, ETag: written.etag });
   },
-  { scope: "collection-meta", rootOnly: true }
+  { scope: "collection-meta" }
 );

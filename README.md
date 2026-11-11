@@ -468,8 +468,9 @@ answers are different.
 - **Each function** turns that context into the spec's answer through the
   shared `authorize()` ([layers/was-lib/.../auth.mjs](layers/was-lib/nodejs/node_modules/was-lib/auth.mjs)):
   a verified invocation proceeds; the container rule (`DELETE /space/{s}/`,
-  `PUT /space/{s}/meta`, `DELETE /space/{s}/{c}/`, `PUT /space/{s}/{c}/meta`)
-  refuses a delegated capability; the `Digest` header a signed body carries is
+  `PUT /space/{s}/meta`, `DELETE /space/{s}/{c}/`) refuses a delegated
+  capability, while `PUT /space/{s}/{c}/meta` takes any chain that covers
+  the URL; the `Digest` header a signed body carries is
   recomputed over the received bytes (`400 invalid-authorization-header` on
   mismatch — the authorizer never sees the body, so this is what binds the
   signature to it); an unsigned `GET`/`HEAD` is allowed where a
@@ -652,11 +653,14 @@ response deliberately says only `404`.
 - **Revocation records are not part of the Space archive**: an export
   carries no `revocations/` entries and an import installs none, where the
   reference server archives them under `.revocations/`.
-- **The container rule has no exceptions**: the reference server lets a
-  delegated chain whose tail is a target-exact `DELETE`-only grant delete a
-  Space, and a Space-subtree grant write a Collection's history log; here
-  `DELETE /space/{s}/` stays root-only, and `PUT .../meta/log` takes any
-  chain that covers the URL.
+- **The container rule covers the Space, with no exceptions**: the
+  reference server lets a delegated chain whose tail is a target-exact
+  `DELETE`-only grant delete a Space; here `DELETE /space/{s}/` and
+  `PUT /space/{s}/meta` stay root-only. Below the Space, `PUT .../{c}/meta`
+  (creating or configuring a Collection) and `PUT .../meta/log` take any
+  chain that covers the URL, as on the reference server: a delegated
+  client creates the Collections it writes (wallet-core's transient
+  clients mint their annex generation this way).
 - Optional profiles not implemented: chunked resources, quotas, backends,
   linksets, the `blinded-index` query profile.
 
