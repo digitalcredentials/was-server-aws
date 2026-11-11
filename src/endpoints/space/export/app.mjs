@@ -2,7 +2,7 @@ import { handler } from "was-lib/handler.mjs";
 import { respond } from "was-lib/http.mjs";
 import { KEYS, getJson, getObject, listObjects, listAllKeys, listAllPrefixes } from "was-lib/store.mjs";
 import { readCollectionMeta, resourceMetaDoc } from "was-lib/meta.mjs";
-import { serviceDescription } from "was-lib/service.mjs";
+import { serviceDescription, originId } from "was-lib/service.mjs";
 import { notFound, payloadTooLarge } from "was-lib/problems.mjs";
 import {
   packSpaceArchive,
@@ -77,9 +77,20 @@ async function collectionEntry(req, spaceId, collectionId, budget) {
   // members stay out, and the governing log travels as its own file
   const { encryption: _encryption, revisions: _revisions, ...metadata } = stored(meta.doc);
   const files = [{ name: collectionMetadataFileName(collectionId), bytes: bytesOf(meta.governed ? metadata : stored(meta.doc)) }];
+  // The archive format's log entry: a JSON object whose `body` is the log's
+  // JSON Lines text, beside the record's write stamp and generation (this
+  // server's stamp is the object's last-modified time; its generation the
+  // validator's digest)
   const log = await getObject(spaceId, KEYS.collectionLog(collectionId));
   if (log !== null) {
-    files.push({ name: collectionLogFileName(collectionId), bytes: log.body });
+    const record = {
+      body: log.body.toString("utf8"),
+      generation: String(log.etag ?? "").replace(/"/g, ""),
+      updatedAt: log.lastModified?.toISOString?.() ?? new Date(0).toISOString(),
+      updatedAtCounter: 0,
+      originId: originId(),
+    };
+    files.push({ name: collectionLogFileName(collectionId), bytes: bytesOf(record) });
   }
   const policy = await getJson(spaceId, KEYS.collectionPolicy(collectionId));
   if (policy) {
