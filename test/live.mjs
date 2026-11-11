@@ -217,6 +217,17 @@ try {
   check("the unlock Space takes a record", Boolean(record.etag));
   const unlockGone = await unlock.deleteWithOutcome();
   check("the unlock Space deletes", unlockGone.outcome === "deleted");
+
+  // --- create-by-id under open provisioning (OPEN_PROVISIONING=true when
+  // the deployment's OpenProvisioning parameter is on) --------------------
+  if (process.env.OPEN_PROVISIONING === "true") {
+    const chosenId = randomBytes(32).toString("base64url");
+    const chosen = asUnlock.space(chosenId);
+    const opened = await chosen.configure({ name: "Chosen id", controller: unlockKey.controller, type: ["Space"], force: true });
+    check("configure() on a client-chosen id creates a Space under open provisioning", opened.description.controller === unlockKey.controller && opened.description.id === chosenId, JSON.stringify(opened.description.type));
+    const chosenGone = await chosen.deleteWithOutcome();
+    check("the client-chosen Space deletes", chosenGone.outcome === "deleted");
+  }
 } catch (err) {
   console.error("FAIL with error:", err);
   failures++;
