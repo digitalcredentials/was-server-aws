@@ -11,6 +11,7 @@ const ANY = ["GET", "HEAD", "PUT", "POST", "DELETE"];
 
 export const routes = [
   { methods: ["GET", "HEAD"], path: "/", fn: "service/get", auth: false },
+  { methods: ["GET", "HEAD"], path: "/service", fn: "service/get", auth: false },
   { methods: ["POST"], path: "/spaces", fn: "spaces/post" },
   { methods: ["POST"], path: "/spaces/{p}", fn: "spaces/post" },
   { methods: ["GET", "HEAD"], path: "/spaces", fn: "spaces/get" },

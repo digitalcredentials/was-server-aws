@@ -39,21 +39,32 @@ const objectKeys = () => fakes.s3.keys(SPACE);
 test("GET / serves the service description with the service link", async () => {
   const res = await invoke({ path: "/", signer: null });
   assert.equal(res.status, 200);
-  assert.equal(res.headers.link, `<${BASE}/>; rel="service"`);
+  assert.equal(res.headers.link, `<${BASE}/service>; rel="service"`);
   // The one read that may be cached without revalidation: the description
   // sets its own short lifetime instead of the no-cache every other read gets
   assert.equal(res.headers["cache-control"], "public, max-age=300");
-  assert.equal(res.json.url, `${BASE}/`);
+  assert.equal(res.json.url, `${BASE}/service`);
   const entry = res.json.specs["https://w3id.org/pws"][0];
   assert.equal(entry.version, "0.5");
   assert.equal(entry.spaces, `${BASE}/spaces/`);
   assert.ok(entry.features.includes("listing"));
 });
 
+test("GET /service serves the same description, where a base-URL client reads it", async () => {
+  const res = await invoke({ path: "/service", signer: null });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.link, `<${BASE}/service>; rel="service"`);
+  assert.equal(res.json.url, `${BASE}/service`);
+  assert.deepEqual(res.json, (await invoke({ path: "/", signer: null })).json);
+  const head = await invoke({ method: "HEAD", path: "/service", signer: null });
+  assert.equal(head.status, 200);
+  assert.equal(head.body, "");
+});
+
 test("HEAD / carries the link and no body", async () => {
   const res = await invoke({ method: "HEAD", path: "/", signer: null });
   assert.equal(res.status, 200);
-  assert.equal(res.headers.link, `<${BASE}/>; rel="service"`);
+  assert.equal(res.headers.link, `<${BASE}/service>; rel="service"`);
   assert.equal(res.body, "");
 });
 
@@ -156,11 +167,11 @@ test("GET /spaces/ lists the signer's Spaces and pages them", async () => {
 test("HEAD /spaces/ carries the service link, signed or not", async () => {
   const unsigned = await invoke({ method: "HEAD", path: "/spaces/", signer: null });
   assert.equal(unsigned.status, 200);
-  assert.equal(unsigned.headers.link, `<${BASE}/>; rel="service"`);
+  assert.equal(unsigned.headers.link, `<${BASE}/service>; rel="service"`);
   assert.equal(unsigned.body, "");
   const signed = await invoke({ method: "HEAD", path: "/spaces/" });
   assert.equal(signed.status, 200);
-  assert.equal(signed.headers.link, `<${BASE}/>; rel="service"`);
+  assert.equal(signed.headers.link, `<${BASE}/service>; rel="service"`);
 });
 
 test("GET /spaces/ answers an empty list to an unsigned or badly signed caller", async () => {
@@ -892,7 +903,7 @@ test("POST /space/{s}/export answers the Space as a Space archive", async () => 
   const bytes = Buffer.from(res.body, "base64");
   const { archive, entries } = await archiveEntries(bytes);
   assert.equal(archive.spaceId, SPACE);
-  assert.equal(archive.service.url, `${BASE}/`);
+  assert.equal(archive.service.url, `${BASE}/service`);
   assert.ok(archive.service.specs["https://w3id.org/pws"][0].features.includes("export"));
   const names = [...entries.keys()];
   const dir = `space/${SPACE}/`;

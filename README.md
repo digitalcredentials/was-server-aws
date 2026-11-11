@@ -18,7 +18,7 @@ to the canonical one.
 
 | Method | Path | Function | Operation |
 | --- | --- | --- | --- |
-| GET, HEAD | `/` | `ServiceGetFn` | the service description (discovery; no authorization) |
+| GET, HEAD | `/service`, `/` | `ServiceGetFn` | the service description (discovery; no authorization) |
 | POST | `/spaces/` | `SpacesPostFn` | provision a Space (`{controller, name?, type?, coupon}`) |
 | GET | `/spaces/` | `SpacesGetFn` | list the caller's Spaces |
 | GET | `/space/{s}/` | `SpaceCollectionsGetFn` | list the Space's Collections |
@@ -52,10 +52,13 @@ has that one branch and nothing else.
 
 ### Discovery
 
-Every response carries `Link: <{base}/>; rel="service"`. The document at
-the root lists the one specification version served (`0.5`), the Spaces
-Repository URL, and the feature tokens. A v0.5 client reads it before its
-first signed request and refuses a server without it.
+Every response carries `Link: <{base}/service>; rel="service"`. The document
+at `/service` (and, for clients that follow the link from the root, at `/`)
+lists the one specification version served (`0.5`), the Spaces Repository
+URL, and the feature tokens. A v0.5 client reads it before its first signed
+request and refuses a server without it; a client built on a base server
+URL (pws-client 0.105+, FreeWallet) reads `{base}/service` directly, which is
+why the description lives there.
 
 ### Spaces Repository
 
