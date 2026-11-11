@@ -46,6 +46,8 @@ Globals:
         SPACE_URL_BASE: !Ref SpaceBaseUrl
         ID_DOMAIN: !Ref IdDomain
         INSTANCE_VERSION: '0.5.0'
+        FEED_TABLE_NAME: !Ref WasFeedTable
+        FEED_QUEUE_URL: !Ref FeedQueue
 
 Resources:
   # Space-creation coupons, owned by this stack: one row per coupon string.
@@ -71,6 +73,148 @@ Resources:
   # reads it on every request and the Space functions write it. Nothing else
   # should: lcw-back-end's registration and login still use it by name until
   # stage 3 of the did:webvh work removes that.
+  # The `changes` feed (was-lib/feed.mjs): one row per record of a
+  # Collection at the position of its latest write, plus a counter row per
+  # Collection. Fed by the Space buckets' object events through EventBridge
+  # and a FIFO queue (one message group, so positions are assigned in
+  # order), read by the query function through the by-position index.
+  WasFeedTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: was-feed
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: bucket
+          AttributeType: S
+        - AttributeName: record
+          AttributeType: S
+        - AttributeName: feed
+          AttributeType: S
+        - AttributeName: position
+          AttributeType: N
+      KeySchema:
+        - AttributeName: bucket
+          KeyType: HASH
+        - AttributeName: record
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: by-position
+          KeySchema:
+            - AttributeName: feed
+              KeyType: HASH
+            - AttributeName: position
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  FeedDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: was-feed-dead-letters.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      MessageRetentionPeriod: 1209600
+
+  FeedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: was-feed.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FeedDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  FeedQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref FeedQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt FeedQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt FeedRule.Arn
+
+  # Every object created or deleted in a Space bucket (the buckets publish
+  # to EventBridge; src/feed/sweep enables it on buckets that predate this).
+  FeedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+          - Object Deleted
+        detail:
+          bucket:
+            name:
+              - prefix: dcc-was-
+      Targets:
+        - Id: feed-queue
+          Arn: !GetAtt FeedQueue.Arn
+          SqsParameters:
+            MessageGroupId: feed
+
+  FeedConsumerFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/feed/consumer
+      Handler: app.lambdaHandler
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WasFeedTable
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/*
+      Events:
+        Feed:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FeedQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  # Repairs feeds from the buckets' contents and enables event publishing on
+  # older buckets. Invoked by hand (`aws lambda invoke`) or on a schedule.
+  FeedSweepFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/feed/sweep
+      Handler: app.lambdaHandler
+      Timeout: 600
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WasFeedTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref WasSpacesTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:PutBucketNotification
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/*
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt FeedQueue.Arn
+
   WasSpacesTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -358,7 +502,9 @@ Resources:
             TableName: !Ref WasCouponsTable
         - Statement:
             - Effect: Allow
-              Action: s3:CreateBucket
+              Action:
+                - s3:CreateBucket
+                - s3:PutBucketNotification
               Resource: arn:aws:s3:::dcc-was-*
             - Effect: Allow
               Action: s3:PutObject
@@ -487,6 +633,11 @@ Resources:
               Resource: !GetAtt WasSpacesTable.Arn
             - Effect: Allow
               Action:
+                - dynamodb:Query
+                - dynamodb:DeleteItem
+              Resource: !GetAtt WasFeedTable.Arn
+            - Effect: Allow
+              Action:
                 - s3:ListBucket
                 - s3:DeleteBucket
               Resource: arn:aws:s3:::dcc-was-*
@@ -571,7 +722,9 @@ Resources:
                 - dynamodb:PutItem
               Resource: !GetAtt WasSpacesTable.Arn
             - Effect: Allow
-              Action: s3:CreateBucket
+              Action:
+                - s3:CreateBucket
+                - s3:PutBucketNotification
               Resource: arn:aws:s3:::dcc-was-*
             - Effect: Allow
               Action:
@@ -1041,6 +1194,38 @@ Resources:
             ApiId: !Ref WASHttpApi
             Path: /space/{space_id}/{collection_id}/meta/log
             Method: put
+
+  # POST, GET /space/{s}/{c}/query -- the `changes` query profile over the
+  # Collection's feed (was-lib/feed.mjs).
+  CollectionQueryFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/collection/query
+      Handler: app.lambdaHandler
+      Timeout: 30
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WasFeedTable
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::dcc-was-*/*
+      Events:
+        Post:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/query
+            Method: post
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/{collection_id}/query
+            Method: get
 
   # /space/{s}/{c}/policy
   CollectionPolicyGetFn:

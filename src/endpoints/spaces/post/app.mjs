@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DynamoDBClient, GetItemCommand, PutItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
-import { CreateBucketCommand } from "@aws-sdk/client-s3";
+import { CreateBucketCommand, PutBucketNotificationConfigurationCommand } from "@aws-sdk/client-s3";
 import { plainHandler } from "was-lib/handler.mjs";
 import { json, parseJsonBody, NO_STORE } from "was-lib/http.mjs";
 import { verifyDigest } from "was-lib/auth.mjs";
@@ -129,6 +129,8 @@ export const lambdaHandler = plainHandler(async (req) => {
     updatedAt: stamp,
   };
   await s3.send(new CreateBucketCommand({ Bucket: spaceId }));
+  // The bucket's object events feed the Collections' `changes` feeds
+  await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: spaceId, NotificationConfiguration: { EventBridgeConfiguration: {} } }));
   const written = await writeSpaceMeta(req, spaceId, doc);
   await registerSpace({ url: `${SPACE_URL_BASE}/${spaceId}`, controller: controllerDid, type, name, createdAt: stamp });
 
