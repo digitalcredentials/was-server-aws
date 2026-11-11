@@ -1114,13 +1114,18 @@ test("an append carries the stored log verbatim plus exactly one line, under If-
   assert.equal(stale.status, 412);
   const rewritten = await putLog("gov", `${entryLine(1, descriptor(["e9"], "e9"), { method: "resource-log:0.1", scid: "Qm" })}\n${rotated}\n`, { "if-match": etag });
   assert.equal(rewritten.status, 412);
-  const nothingNew = await putLog("gov", `${first}\n`, { "if-match": etag });
-  assert.equal(nothingNew.status, 400);
+  const nothingNew = await putLog("gov", `${entryLine(1, descriptor(["e1"], "e1"), { method: "resource-log:0.1", scid: "QmOther" })}\n`, { "if-match": etag });
+  assert.equal(nothingNew.status, 412, "a rewritten genesis is not an extension");
   const twoNew = await putLog("gov", `${first}\n${rotated}\n${entryLine(3, descriptor(["e1", "e2"], "e2"))}\n`, { "if-match": etag });
   assert.equal(twoNew.status, 400);
   const dropped = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e2"], "e2"))}\n`, { "if-match": etag });
-  assert.equal(dropped.status, 409);
-  assert.equal(dropped.json.type, "https://w3id.org/pws#encryption-immutable");
+  assert.equal(dropped.status, 400, "a dropped epoch is a malformed write, as the reference server answers it");
+  assert.equal(dropped.json.type, "https://w3id.org/pws#invalid-request-body");
+  const unchanged = await putLog("gov", `${first}\n`, { "if-match": etag });
+  assert.equal(unchanged.status, 204, "a byte-identical re-put is a no-op");
+  assert.equal(unchanged.headers.etag, etag);
+  const reserved = await putLog("gov", `${first}\n${entryLine(2, { ...descriptor(["e1", "e2"], "e2"), history: {} })}\n`, { "if-match": etag });
+  assert.equal(reserved.status, 400, "history is reserved in a state");
   const backwards = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e1", "e2"], "e1"))}\n`, { "if-match": etag });
   assert.equal(backwards.status, 204, "a new epoch that is not current is still an append");
   const etag2 = backwards.headers.etag;
@@ -1130,7 +1135,7 @@ test("an append carries the stored log verbatim plus exactly one line, under If-
   assert.equal(forward.status, 204);
   const etag3 = forward.headers.etag;
   const moved = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e1", "e2"], "e1"))}\n${entryLine(3, descriptor(["e1", "e2", "e3"], "e3"))}\n${entryLine(4, descriptor(["e1", "e2", "e3"], "e1"))}\n`, { "if-match": etag3 });
-  assert.equal(moved.status, 409, "currentEpoch never moves backwards");
+  assert.equal(moved.status, 400, "currentEpoch never moves backwards");
   const scheme = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e1", "e2"], "e1"))}\n${entryLine(3, descriptor(["e1", "e2", "e3"], "e3"))}\n${entryLine(4, { ...descriptor(["e1", "e2", "e3"], "e3"), scheme: "other" })}\n`, { "if-match": etag3 });
   assert.equal(scheme.status, 409);
 
@@ -1181,8 +1186,8 @@ test("governance is refused where a client-written descriptor already stands, an
   const installed = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { encryption: descriptor(["e1"], "e1") } });
   assert.equal(installed.status, 200, installed.body);
   const dropped = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { encryption: descriptor(["e2"], "e2") } });
-  assert.equal(dropped.status, 409);
-  assert.equal(dropped.json.type, "https://w3id.org/pws#encryption-immutable");
+  assert.equal(dropped.status, 400);
+  assert.equal(dropped.json.type, "https://w3id.org/pws#invalid-request-body");
   const cleared = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { name: "plain" } });
   assert.equal(cleared.status, 409);
   const rotated = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { encryption: descriptor(["e1", "e2"], "e2") } });
@@ -1212,7 +1217,10 @@ test("a Space archive carries a governing log, and an import restores it", async
   const { entries } = await archiveEntries(Buffer.from(exported.body, "base64"));
   const dir = `space/${SPACE}/gov/`;
   assert.ok(entries.has(`${dir}.collectionlog.gov.json`));
-  assert.equal(entries.get(`${dir}.collectionlog.gov.json`).toString("utf8"), genesisLine(descriptor(["e1"], "e1")) + "\n");
+  const logRecord = JSON.parse(entries.get(`${dir}.collectionlog.gov.json`).toString("utf8"));
+  assert.equal(logRecord.body, genesisLine(descriptor(["e1"], "e1")) + "\n");
+  assert.equal(logRecord.originId, "dcc-was-sandbox");
+  assert.ok(logRecord.generation && logRecord.updatedAt);
   assert.equal(JSON.parse(entries.get(`${dir}.collection.meta.gov.json`).toString("utf8")).encryption, undefined);
 
   await seedSpace(fakes, { spaceId: SPACE_B });

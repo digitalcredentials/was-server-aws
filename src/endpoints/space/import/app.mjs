@@ -113,7 +113,9 @@ async function readArchive(body) {
           collection(position.collectionId).meta = collectionMetadataFromFile({ bytes: await entry.bytes() });
           break;
         case "collectionLog":
-          collection(position.collectionId).log = Buffer.from(await entry.bytes());
+          // The archive's log entry is a JSON object whose `body` is the
+          // log's JSON Lines text; a bare JSON Lines file is taken as well
+          collection(position.collectionId).log = archivedLogBody(Buffer.from(await entry.bytes()));
           break;
         case "policy":
           collection(position.collectionId).policy = policyFromFile({ bytes: await entry.bytes() });
@@ -143,6 +145,21 @@ async function readArchive(body) {
     await archive.close().catch(() => undefined);
   }
   return { spaceId: archive.spaceId, space, collections };
+}
+
+// The JSON Lines text of an archived log entry: the `body` of the archive
+// format's JSON object, or the bytes themselves when they are not one.
+function archivedLogBody(bytes) {
+  const text = bytes.toString("utf8");
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.body === "string") {
+      return Buffer.from(parsed.body, "utf8");
+    }
+  } catch {
+    // JSON Lines with more than one line is not one JSON text
+  }
+  return bytes;
 }
 
 // The stored Collection Metadata for an archived one: the archive's own

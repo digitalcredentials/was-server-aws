@@ -4,6 +4,7 @@ import { KEYS, getJson } from "was-lib/store.mjs";
 import { hasContent } from "was-lib/meta.mjs";
 import {
   parseLog,
+  sameLog,
   readCollectionLog,
   checkHeadState,
   assertFastForward,
@@ -53,6 +54,10 @@ export const lambdaHandler = handler(
       }
       if (ifMatch !== current.etag) {
         throw preconditionFailed("The log changed since it was read.");
+      }
+      if (sameLog(current.lines, lines)) {
+        // A byte-identical re-put: nothing to write
+        return noContent(req, { ...NO_STORE, ETag: current.etag });
       }
       assertFastForward(current.lines, lines);
       checkHeadState(entries, current.entries);
