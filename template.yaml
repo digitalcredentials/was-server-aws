@@ -402,9 +402,11 @@ Resources:
 
   # Verifies the capability invocation of every signed request and reports
   # the result in the request context (signed, verified, controller,
-  # delegated, spaceController, spaceType, or space=missing). It never
-  # denies: a gateway denial is always a 403, and the spec's answers to an
-  # unauthorized request are shaped by the endpoint functions.
+  # delegated, denial, spaceController, spaceType, or space=missing). It
+  # never denies: a gateway denial is always a 403, and the spec's answers
+  # to an unauthorized request are shaped by the endpoint functions. A
+  # delegated chain also passes the chain inspectors: the Space's
+  # revocation records and the client-annex clause.
   WASZcapAuthorizerFn:
     Type: AWS::Serverless::Function
     Properties:
@@ -420,7 +422,9 @@ Resources:
         - Statement:
             # The DID logs of this deployment's accounts, read from their
             # Spaces' buckets (ListBucket on the one key so a missing log is
-            # a 404 rather than a 403).
+            # a 404 rather than a 403); the revocation records a delegated
+            # chain is checked against; the Space Metadata the client-annex
+            # clause reads a Space's type and controller from.
             - Effect: Allow
               Action: s3:ListBucket
               Resource: arn:aws:s3:::dcc-was-*
@@ -428,9 +432,14 @@ Resources:
                 StringLike:
                   s3:prefix:
                   - collections/*/did.jsonl
+                  - revocations/*
+                  - meta/space.json
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/collections/*/did.jsonl
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*/did.jsonl
+                - arn:aws:s3:::dcc-was-*/revocations/*
+                - arn:aws:s3:::dcc-was-*/meta/space.json
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -449,6 +458,66 @@ Resources:
           - app.mjs
         # createRequire lets the bundled CJS dependencies work inside an ESM
         # output.
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
+  # POST /space/{s}/zcaps/revocations/{id} -- revoke a delegated capability
+  # rooted in the Space. It verifies the capability chain in the request
+  # body, which needs the authorizer's verification stack, so it is built
+  # from the same directory with its own entry point; the gateway
+  # authorizer does not run for the route (the function verifies the
+  # invocation itself, under the dual-root rule).
+  SpaceRevocationPostFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/authorizer
+      Handler: revoke.lambdaHandler
+      Timeout: 10
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WasSpacesTable
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: arn:aws:s3:::dcc-was-*
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - collections/*/did.jsonl
+                  - revocations/*
+                  - meta/space.json
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - arn:aws:s3:::dcc-was-*/collections/*/did.jsonl
+                - arn:aws:s3:::dcc-was-*/revocations/*
+                - arn:aws:s3:::dcc-was-*/meta/space.json
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: arn:aws:s3:::dcc-was-*/revocations/*
+      Events:
+        Revoke:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/zcaps/revocations/{revocation_id}
+            Method: post
+            Auth:
+              Authorizer: NONE
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2022"
+        Format: "esm"
+        Platform: "node"
+        External:
+          - "@aws-sdk/*"
+          - "was-lib/*"
+        OutExtension:
+          - .js=.mjs
+        EntryPoints:
+          - revoke.mjs
         Banner:
           - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
 

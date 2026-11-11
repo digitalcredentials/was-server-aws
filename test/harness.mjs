@@ -20,7 +20,10 @@ export const BASE = `${PROTO}://${HOST}`;
 const handlers = new Map();
 async function handlerFor(fn) {
   if (!handlers.has(fn)) {
-    handlers.set(fn, (await import(`../src/endpoints/${fn}/app.mjs`)).lambdaHandler);
+    // Endpoint functions live under src/endpoints/{fn}/app.mjs; the one
+    // built from the authorizer's directory is named by its module
+    const module = fn.startsWith("authorizer/") ? `../src/${fn}.mjs` : `../src/endpoints/${fn}/app.mjs`;
+    handlers.set(fn, (await import(module)).lambdaHandler);
   }
   return handlers.get(fn);
 }

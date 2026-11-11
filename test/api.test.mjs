@@ -11,7 +11,8 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { installFakes } from "./fakes.mjs";
-import { invoke, seedSpace, seedObject, controllerKey, strangerKey, BASE, asWebvh, mintWebvh, seedWebvhLog, bucketOf, clearWebvhCache } from "./harness.mjs";
+import { invoke, seedSpace, seedObject, controllerKey, strangerKey, keyFromSeed, BASE, asWebvh, mintWebvh, seedWebvhLog, bucketOf, clearWebvhCache } from "./harness.mjs";
+import { clientAnnexChainInspector } from "../src/authorizer/annex.mjs";
 import { deriveSpaceId } from "was-lib/webvh.mjs";
 import { applyObjectEvent, readCounter, classifyKey } from "was-lib/feed.mjs";
 import { sweepBucket, lambdaHandler as sweep } from "../src/feed/sweep/app.mjs";
@@ -246,13 +247,18 @@ test("PUT /space/{s}/meta refuses a controller change and a type change", async 
 });
 
 test("unimplemented optional sections answer 501, undefined methods at reserved endpoints 405", async () => {
-  for (const path of [`/space/${SPACE}/linkset`, `/space/${SPACE}/quotas`, `/space/${SPACE}/c/r/chunks/0`, `/space/${SPACE}/zcaps/revocations/x`]) {
+  for (const path of [`/space/${SPACE}/linkset`, `/space/${SPACE}/quotas`, `/space/${SPACE}/c/r/chunks/0`]) {
     const res = await invoke({ path });
     assert.equal(res.status, 501, path);
     assert.equal(res.json.type, "https://w3id.org/pws#unsupported-operation");
   }
   const method = await invoke({ method: "DELETE", path: `/space/${SPACE}/c/meta/x` });
   assert.equal(method.status, 405);
+  // The revocation endpoint is served (POST); the segment takes no other method
+  for (const path of [`/space/${SPACE}/zcaps`, `/space/${SPACE}/zcaps/revocations/x`]) {
+    const res = await invoke({ path });
+    assert.equal(res.status, 405, path);
+  }
 });
 
 // --- collections -----------------------------------------------------------------
@@ -1565,4 +1571,272 @@ test("with open provisioning a did:key creates a Space by id, within its cap; wi
     delete process.env.OPEN_PROVISIONING;
     delete process.env.MAX_SPACES_PER_CONTROLLER;
   }
+});
+
+// --- revocations ---------------------------------------------------------------
+
+const thirdKey = await keyFromSeed("a-third-party-key-000000000000000");
+const revocationPath = (capability) => `/space/${SPACE}/zcaps/revocations/${encodeURIComponent(capability.id)}`;
+const REVOKED = "https://w3id.org/pws#capability-revoked";
+
+test("the controller revokes a delegated capability; the holder is told it was revoked; resubmission is refused", async () => {
+  const capability = await delegateSpace(EddsaJcs2022, ["GET", "PUT"]);
+  const path = `/space/${SPACE}/notes/one`;
+  const put = await invoke({ method: "PUT", path, json: { v: 1 }, signer: strangerKey, capability });
+  assert.equal(put.status, 201, put.body);
+
+  const revoked = await invoke({ method: "POST", path: revocationPath(capability), json: capability });
+  assert.equal(revoked.status, 204, revoked.body);
+  assert.equal(revoked.headers["cache-control"], "no-store");
+  assert.equal(objectKeys().filter((key) => key.startsWith("revocations/")).length, 1);
+
+  // The grant no longer works, and its holder learns why
+  const read = await invoke({ path, signer: strangerKey, capability });
+  assert.equal(read.status, 404);
+  assert.equal(read.json.type, REVOKED);
+  // The controller's own root invocation is untouched
+  const own = await invoke({ path });
+  assert.equal(own.status, 200);
+  // A second submission: already revoked
+  const again = await invoke({ method: "POST", path: revocationPath(capability), json: capability });
+  assert.equal(again.status, 400);
+  assert.equal(again.json.type, "https://w3id.org/pws#capability-already-revoked");
+  // Any other method at the reserved segment is 405
+  const get = await invoke({ path: revocationPath(capability) });
+  assert.equal(get.status, 405);
+});
+
+test("a delegee revokes its own capability; a stranger to the chain, an unsigned request and a malformed body are refused", async () => {
+  const capability = await delegateSpace(EddsaJcs2022, ["GET"]);
+  // Not a party to the chain: the masked 404
+  const outsider = await invoke({ method: "POST", path: revocationPath(capability), json: capability, signer: thirdKey });
+  assert.equal(outsider.status, 404);
+  // Unsigned: a write
+  const unsigned = await invoke({ method: "POST", path: revocationPath(capability), json: capability, signer: null });
+  assert.equal(unsigned.status, 401);
+  // The controller, with a body that is not the capability the URL names
+  const mismatch = await invoke({ method: "POST", path: revocationPath(capability), json: { ...capability, id: "urn:zcap:delegated:other" } });
+  assert.equal(mismatch.status, 400);
+  assert.equal(mismatch.json.type, "https://w3id.org/pws#invalid-request-body");
+  // A root capability cannot be revoked (checked before the id is compared
+  // to the URL's, so the URL need not carry the doubly-encoded root id)
+  const root = await invoke({ method: "POST", path: `/space/${SPACE}/zcaps/revocations/root`, json: { id: "urn:zcap:root:x" } });
+  assert.equal(root.status, 400);
+  // A chain that does not verify (a tampered capability)
+  const tampered = await invoke({ method: "POST", path: revocationPath(capability), json: { ...capability, allowedAction: ["GET", "DELETE"] } });
+  assert.equal(tampered.status, 400);
+  // A chain rooted outside this Space
+  const elsewhere = await delegateSpace(EddsaJcs2022, ["GET"]);
+  const foreign = await invoke({ method: "POST", path: `/space/${SPACE_B}/zcaps/revocations/${encodeURIComponent(elsewhere.id)}`, json: elsewhere });
+  assert.equal(foreign.status, 404); // SPACE_B is not registered in this test
+  // The delegee itself, invoking the revocation URL's own root
+  const self = await invoke({ method: "POST", path: revocationPath(capability), json: capability, signer: strangerKey });
+  assert.equal(self.status, 204, self.body);
+  const read = await invoke({ path: `/space/${SPACE}/meta`, signer: strangerKey, capability });
+  assert.equal(read.status, 404);
+  assert.equal(read.json.type, REVOKED);
+});
+
+test("a chain holding a revoked capability is refused at any depth", async () => {
+  const grant = await delegateSpace(EddsaJcs2022, ["GET", "PUT"]);
+  const client = new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: strangerKey.signer() });
+  const onward = await client.delegate({
+    capability: grant,
+    controller: thirdKey.controller,
+    allowedActions: ["GET"],
+    expires: new Date(Date.now() + 3600 * 1000),
+  });
+  await invoke({ method: "PUT", path: `/space/${SPACE}/notes/one`, json: { v: 1 } });
+  const before = await invoke({ path: `/space/${SPACE}/notes/one`, signer: thirdKey, capability: onward });
+  assert.equal(before.status, 200, before.body);
+  // The middle link is revoked by its own holder
+  const revoked = await invoke({ method: "POST", path: revocationPath(grant), json: grant, signer: strangerKey });
+  assert.equal(revoked.status, 204, revoked.body);
+  const after = await invoke({ path: `/space/${SPACE}/notes/one`, signer: thirdKey, capability: onward });
+  assert.equal(after.status, 404);
+  assert.equal(after.json.type, REVOKED);
+  // Revoking the onward grant now: its chain already holds a revoked link
+  const again = await invoke({ method: "POST", path: revocationPath(onward), json: onward, signer: thirdKey });
+  assert.equal(again.status, 400);
+  assert.equal(again.json.type, "https://w3id.org/pws#capability-already-revoked");
+});
+
+// --- the client-annex clause ---------------------------------------------------
+
+const ACCT = "dcc-was-0000aaaa-0000-4000-8000-0000000000ad";
+const ANNEX_SPACE = "dcc-was-0000aaaa-0000-4000-8000-0000000000ae";
+const ACCT_URL = `${BASE}/space/${ACCT}/`;
+const WAS_ACTIONS = ["GET", "HEAD", "POST", "PUT", "DELETE"];
+const ladderKey = await keyFromSeed("ladder-verification-method-0000000");
+const annexKey = await keyFromSeed("annex-client-key-00000000000000000");
+const transientKey = await keyFromSeed("transient-annex-vm-000000000000000");
+
+// A self-hosted did:webvh document (did:webvh:{scid}:localhost%3A3000:space:{spaceId}:id):
+// `key` under every relationship (an enrolled client), `ladder` under
+// assertionMethod and capabilityDelegation only (a ladder VM), `transient`
+// under the two capability relationships only (a transient annex VM).
+async function mintAccount({ spaceId, key, ladder, transient, services }) {
+  const { createDID, logToJsonlString } = await import("@interop/did-method-webvh");
+  const k = key.fingerprint();
+  const l = ladder?.fingerprint();
+  const t = transient?.fingerprint();
+  const members = [k, l, t].filter(Boolean);
+  const { did, log } = await createDID({
+    address: "localhost%3A3000",
+    paths: ["space", spaceId, "id"],
+    signer: signerFromDidKeySigner(key.signer()),
+    updateKeys: [`did:key:${k}`],
+    verificationMethods: members.map((publicKeyMultibase) => ({ type: "Multikey", publicKeyMultibase })),
+    vmIdFragment: "multibase",
+    portable: true,
+    authentication: [`#${k}`],
+    assertionMethod: [`#${k}`, ...(l ? [`#${l}`] : [])],
+    capabilityInvocation: [`#${k}`, ...(t ? [`#${t}`] : [])],
+    capabilityDelegation: [`#${k}`, ...(l ? [`#${l}`] : []), ...(t ? [`#${t}`] : [])],
+    ...(services && { services }),
+  });
+  return { did, jsonl: logToJsonlString(log) };
+}
+
+// The account Space (controlled by the account DID, whose ladder VM is
+// `ladderKey`) and the auxiliary Space holding the client-annex DID the
+// account document points at (its key `annexKey`, a transient VM
+// `transientKey`).
+async function seedAnnexAccount() {
+  const annex = await mintAccount({ spaceId: ANNEX_SPACE, key: annexKey, transient: transientKey });
+  const account = await mintAccount({
+    spaceId: ACCT,
+    key: controllerKey,
+    ladder: ladderKey,
+    services: [{ id: "#delegated-clients", type: "https://w3id.org/byoe#DelegatedClients", serviceEndpoint: annex.did }],
+  });
+  await seedSpace(fakes, { spaceId: ACCT, controller: account.did });
+  await seedWebvhLog(fakes, ACCT, account.jsonl);
+  await seedSpace(fakes, { spaceId: ANNEX_SPACE, controller: account.did, type: ["AuxiliarySpace", "DelegatedClientsSpace", "Space"] });
+  await seedWebvhLog(fakes, ANNEX_SPACE, annex.jsonl);
+  return { account, annex };
+}
+
+// A delegation signed by the account's ladder VM
+const ladderDelegate = (account, options) =>
+  new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: asWebvh(ladderKey, account.did).signer() }).delegate({
+    capability: rootCapabilityId(ACCT_URL),
+    expires: new Date(Date.now() + 3600 * 1000),
+    ...options,
+  });
+
+test("the service description claims the client-annex clause", async () => {
+  const res = await invoke({ path: "/service", signer: null });
+  assert.deepEqual(res.json.specs["https://w3id.org/pws/client-annex"], [{ version: "0.1" }]);
+});
+
+test("a ladder VM's delegation is admitted in the clause's shapes and refused outside them", async () => {
+  const { account, annex } = await seedAnnexAccount();
+  const path = `/space/${ACCT}/notes/one`;
+  const written = await invoke({ method: "PUT", path, json: { v: 1 }, signer: asWebvh(controllerKey, account.did) });
+  assert.equal(written.status, 201, written.body);
+
+  // Shape 1: the Space items subtree, to the annex DID, with the whole verb
+  // vocabulary (the generation delegation); the annex's key invokes it
+  const generation = await ladderDelegate(account, { controller: annex.did, invocationTarget: ACCT_URL, allowedActions: WAS_ACTIONS });
+  const viaAnnex = await invoke({ path, signer: asWebvh(annexKey, annex.did), capability: generation });
+  assert.equal(viaAnnex.status, 200, viaAnnex.body);
+
+  // The same grant to anyone else is refused
+  const toStranger = await ladderDelegate(account, { controller: strangerKey.controller, invocationTarget: ACCT_URL, allowedActions: WAS_ACTIONS });
+  const stranger = await invoke({ path, signer: strangerKey, capability: toStranger });
+  assert.equal(stranger.status, 404);
+
+  // Shape 4: a GET-only grant of one Resource, to anyone
+  const readOne = await ladderDelegate(account, { controller: strangerKey.controller, invocationTarget: `${ACCT_URL}notes/one`, allowedActions: ["GET"] });
+  const read = await invoke({ path, signer: strangerKey, capability: readOne });
+  assert.equal(read.status, 200, read.body);
+  // ... but not a two-verb grant of it
+  const writeOne = await ladderDelegate(account, { controller: strangerKey.controller, invocationTarget: `${ACCT_URL}notes/one`, allowedActions: ["GET", "PUT"] });
+  const write = await invoke({ method: "PUT", path, json: { v: 2 }, signer: strangerKey, capability: writeOne });
+  assert.equal(write.status, 404);
+  // ... nor a GET of a Collection container: the listing answers empty, as
+  // every unauthorized listing does, and the Resources under it stay unread
+  const readAll = await ladderDelegate(account, { controller: strangerKey.controller, invocationTarget: `${ACCT_URL}notes/`, allowedActions: ["GET"] });
+  const listing = await invoke({ path: `/space/${ACCT}/notes/`, signer: strangerKey, capability: readAll });
+  assert.equal(listing.status, 200);
+  assert.deepEqual(listing.json.items, []);
+  const under = await invoke({ path, signer: strangerKey, capability: readAll });
+  assert.equal(under.status, 404);
+
+  // Shape 3: a GET-only grant of the Space Metadata object
+  const readMeta = await ladderDelegate(account, { controller: strangerKey.controller, invocationTarget: `${ACCT_URL}meta`, allowedActions: ["GET"] });
+  const meta = await invoke({ path: `/space/${ACCT}/meta`, signer: strangerKey, capability: readMeta });
+  assert.equal(meta.status, 200, meta.body);
+
+  // Shape 2: a GET/PUT/POST grant of the whole delegated-clients Space
+  const annexSpace = await ladderDelegate(account, {
+    capability: rootCapabilityId(`${BASE}/space/${ANNEX_SPACE}/`),
+    controller: strangerKey.controller,
+    invocationTarget: `${BASE}/space/${ANNEX_SPACE}/`,
+    allowedActions: ["GET", "PUT", "POST"],
+  });
+  const annexWrite = await invoke({ method: "PUT", path: `/space/${ANNEX_SPACE}/log/entry`, json: { v: 1 }, signer: strangerKey, capability: annexSpace });
+  assert.equal(annexWrite.status, 201, annexWrite.body);
+  // ... which an ordinary Space does not admit
+  const wholeSpace = await ladderDelegate(account, { controller: strangerKey.controller, invocationTarget: ACCT_URL, allowedActions: ["GET", "PUT", "POST"] });
+  const ordinary = await invoke({ path, signer: strangerKey, capability: wholeSpace });
+  assert.equal(ordinary.status, 404);
+
+  // Shape 2: the bridge, a PUT-only grant of the account's own log (last:
+  // it overwrites the log the account resolves from)
+  const bridge = await ladderDelegate(account, { controller: strangerKey.controller, invocationTarget: `${ACCT_URL}id/did.jsonl`, allowedActions: ["PUT"] });
+  const log = await invoke({ method: "PUT", path: `/space/${ACCT}/id/did.jsonl`, body: account.jsonl, contentType: "text/jsonl", signer: strangerKey, capability: bridge });
+  assert.equal(log.status, 204, log.body);
+});
+
+test("a delegation an enrolled client signs is outside the clause", async () => {
+  const { account } = await seedAnnexAccount();
+  const client = new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: asWebvh(controllerKey, account.did).signer() });
+  const grant = await client.delegate({
+    capability: rootCapabilityId(ACCT_URL),
+    controller: strangerKey.controller,
+    invocationTarget: ACCT_URL,
+    allowedActions: ["GET", "PUT"],
+    expires: new Date(Date.now() + 3600 * 1000),
+  });
+  const put = await invoke({ method: "PUT", path: `/space/${ACCT}/notes/one`, json: { v: 1 }, signer: strangerKey, capability: grant });
+  assert.equal(put.status, 201, put.body);
+});
+
+test("the invocation-time bounds: a ladder-descended chain neither rewrites the Space Metadata nor deletes the Space without a DELETE-only ladder grant", async () => {
+  const { account, annex } = await seedAnnexAccount();
+  const inspect = (invocation, chain) => clientAnnexChainInspector({ serverUrl: BASE, invocation })(chain);
+  const ladderVm = `${account.did}#${ladderKey.fingerprint()}`;
+  const annexVm = `${annex.did}#${annexKey.fingerprint()}`;
+  const transientVm = `${annex.did}#${transientKey.fingerprint()}`;
+  const enrolledVm = `${account.did}#${controllerKey.fingerprint()}`;
+  const meta = (vm) => ({ verifyResult: { results: [{ verificationMethod: { id: vm } }] } });
+  const signed = (capability, vm) => ({ ...capability, proof: { proofPurpose: "capabilityDelegation", verificationMethod: vm } });
+  const root = { id: rootCapabilityId(ACCT_URL), invocationTarget: ACCT_URL, controller: account.did };
+  const subtree = signed({ id: "urn:zcap:delegated:1", parentCapability: root.id, invocationTarget: ACCT_URL, controller: annex.did, allowedAction: WAS_ACTIONS }, ladderVm);
+  const chainOf = (...links) => ({ capabilityChain: [root, ...links], capabilityChainMeta: [{ verifyResult: null }, ...links.map((link) => meta(link.proof.verificationMethod))] });
+
+  // The annex narrows the generation grant into a DELETE-only tail
+  const narrowed = signed({ id: "urn:zcap:delegated:2", parentCapability: subtree.id, invocationTarget: ACCT_URL, controller: strangerKey.controller, allowedAction: ["DELETE"] }, annexVm);
+  const chain = chainOf(subtree, narrowed);
+  assert.equal((await inspect({ target: `${ACCT_URL}notes/one`, action: "GET" }, chain)).valid, true);
+  assert.equal((await inspect({ target: ACCT_URL, action: "DELETE" }, chain)).valid, false);
+  assert.equal((await inspect({ target: `${ACCT_URL}meta`, action: "PUT" }, chain)).valid, false);
+
+  // A genuine DELETE-only ladder grant (shape 3) may delete
+  const ladderDelete = signed({ id: "urn:zcap:delegated:3", parentCapability: root.id, invocationTarget: ACCT_URL, controller: strangerKey.controller, allowedAction: ["DELETE"] }, ladderVm);
+  const deletion = await inspect({ target: ACCT_URL, action: "DELETE" }, chainOf(ladderDelete));
+  assert.equal(deletion.valid, true, deletion.error?.message);
+
+  // A link a transient annex VM signed never deletes, whatever signed the rest
+  const transientChild = signed({ ...narrowed, id: "urn:zcap:delegated:4" }, transientVm);
+  assert.equal((await inspect({ target: `${ACCT_URL}notes/one`, action: "GET" }, chainOf(subtree, transientChild))).valid, true);
+  assert.equal((await inspect({ target: ACCT_URL, action: "DELETE" }, chainOf(subtree, transientChild))).valid, false);
+
+  // A chain the enrolled client signed carries no ladder link: outside the clause
+  const enrolled = signed({ ...subtree, id: "urn:zcap:delegated:5", controller: strangerKey.controller }, enrolledVm);
+  assert.equal((await inspect({ target: `${ACCT_URL}meta`, action: "PUT" }, chainOf(enrolled))).valid, true);
+  // Without an operation to bound (the revocation route) only the shapes are judged
+  assert.equal((await clientAnnexChainInspector({ serverUrl: BASE })(chain)).valid, true);
 });
