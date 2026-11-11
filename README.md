@@ -143,7 +143,43 @@ account Space. It is off by default; the `OpenProvisioning` parameter
 many Spaces one key may create that way (507 `quota-exceeded` past it).
 The id `server` is reserved. The authorizer verifies such a request as a
 root invocation of the signer, and the handler requires the stated
-controller to be that signer.
+controller to be that signer. Both of these coupon-less creations, the
+unlock Spaces and open provisioning, count against the cap below.
+
+### The cap on Spaces created without a coupon
+
+**Standing note (2026-11-11).** The unlock Space path is open: any holder
+of a did:key can create an unlock Space, and so an S3 bucket, with no
+coupon and no account, because an unlock Space is created before the
+account it will point at is known to the server. FreeWallet depends on it
+(binding a passphrase or passkey creates one), so it stays open while
+FreeWallet clients join accounts on this server. Our own wallet creates
+every Space it needs, unlock Spaces included, through `POST /spaces/` with
+the coupon (a client-chosen `id`, see above), so it is not subject to the
+cap. When FreeWallet no longer needs the path, close it by deploying with
+`MaxCouponlessSpaces=0`.
+
+What bounds it:
+
+- `MaxCouponlessSpaces` (default 200) caps how many Spaces created without
+  a coupon may exist. A counter row in the registry table
+  (`urn:was-server-aws:couponless-spaces`) is reserved with a conditional
+  increment before such a bucket is created and released when such a Space
+  is deleted; past the cap the creation is `507 quota-exceeded`. Each
+  registry row records `provisioning` (`coupon`, `derived`, `open`).
+- `QuotaWatchFn` runs hourly (and by hand: `aws lambda invoke
+  --function-name <stack>-QuotaWatchFn-... --payload '{}' out.json`),
+  publishing `WasServer/CouponlessSpaces` and `WasServer/SpaceBuckets`.
+  The alarms `was-server-couponless-spaces` (threshold
+  `CouponlessAlarmThreshold`, default 160) and `was-server-space-buckets`
+  (`SpaceBucketsAlarmThreshold`, default 300) notify the SNS topic
+  `was-server-quota-alerts`; deploy with `AlertEmail=<address>` to
+  subscribe an address (confirm the subscription email). Check them with
+  `aws cloudwatch describe-alarms --alarm-name-prefix was-server`.
+- A whole-registry feed sweep (`FeedSweepFn` with `{}`) recounts the
+  counter from the rows and backfills `provisioning` on rows from before
+  the attribute existed (read by their id form until then). Run it once
+  after deploying this.
 
 ### Self-hosted did:webvh
 
@@ -597,6 +633,9 @@ response deliberately says only `404`.
 
 - **No replay protection.** A captured signed request can be replayed until
   its `expires` passes.
+- **Unlock Spaces are created without a coupon** by any key holder, bounded
+  only by `MaxCouponlessSpaces` (see the cap section above). Close the path
+  with `MaxCouponlessSpaces=0` once FreeWallet no longer needs it.
 - **`expectedHost` is the request's own `Host` header**, so it constrains
   nothing by itself; the registry lookup keyed by host is what prevents a
   spoofed host from widening access.

@@ -17,6 +17,8 @@ import { deriveSpaceId } from "was-lib/webvh.mjs";
 import { applyObjectEvent, readCounter, classifyKey } from "was-lib/feed.mjs";
 import { sweepBucket, lambdaHandler as sweep } from "../src/feed/sweep/app.mjs";
 import { lambdaHandler as feedConsumer } from "../src/feed/consumer/app.mjs";
+import { lambdaHandler as quotaWatch } from "../src/quota/watch/app.mjs";
+import { COUNTER_KEY, readCouponlessCount } from "was-lib/quota.mjs";
 import { updateDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
 import { ZcapClient } from "@interop/ezcap";
 import { Ed25519Signature2020 } from "@interop/ed25519-signature";
@@ -1870,4 +1872,94 @@ test("the invocation-time bounds: a ladder-descended chain neither rewrites the 
   assert.equal((await inspect({ target: `${ACCT_URL}meta`, action: "PUT" }, chainOf(enrolled))).valid, true);
   // Without an operation to bound (the revocation route) only the shapes are judged
   assert.equal((await clientAnnexChainInspector({ serverUrl: BASE })(chain)).valid, true);
+});
+
+// --- the cap on Spaces created without a coupon -------------------------------
+
+// Creates an unlock Space for `key` (the coupon-less path any key holder can take)
+const createUnlockSpace = (key) =>
+  invoke({
+    method: "PUT",
+    path: `/space/${deriveSpaceId(key.controller)}/meta`,
+    json: { controller: key.controller, type: ["AuxiliarySpace", "Space", "UnlockSpace"] },
+    headers: { "if-none-match": "*" },
+    signer: key,
+  });
+
+test("unlock Spaces take slots under the cap; past it they are refused; a delete gives one back; a coupon Space never counts", async () => {
+  process.env.MAX_COUPONLESS_SPACES = "2";
+  try {
+    const keys = await Promise.all(["unlock-one", "unlock-two", "unlock-three"].map((seed) => keyFromSeed(`${seed}-00000000000000000000000`)));
+    const first = await createUnlockSpace(keys[0]);
+    assert.equal(first.status, 201, first.body);
+    assert.equal(await readCouponlessCount(), 1);
+    const row = fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${deriveSpaceId(keys[0].controller)}`);
+    assert.equal(row.provisioning.S, "derived");
+    const second = await createUnlockSpace(keys[1]);
+    assert.equal(second.status, 201, second.body);
+    // The cap: no bucket is created and the counter stays
+    const third = await createUnlockSpace(keys[2]);
+    assert.equal(third.status, 507);
+    assert.equal(third.json.type, "https://w3id.org/pws#quota-exceeded");
+    assert.ok(!fakes.s3.buckets.has(bucketOf(deriveSpaceId(keys[2].controller))));
+    assert.equal(await readCouponlessCount(), 2);
+    // Deleting a coupon-less Space gives its slot back
+    const gone = await invoke({ method: "DELETE", path: `/space/${deriveSpaceId(keys[1].controller)}/`, signer: keys[1] });
+    assert.equal(gone.status, 204);
+    assert.equal(await readCouponlessCount(), 1);
+    const retried = await createUnlockSpace(keys[2]);
+    assert.equal(retried.status, 201, retried.body);
+    // A coupon-created Space is outside the cap, whatever its id
+    const withCoupon = await invoke({
+      method: "POST",
+      path: "/spaces/",
+      json: { id: deriveSpaceId(strangerKey.controller), controller: controllerKey.controller, coupon: "open-sesame" },
+    });
+    assert.equal(withCoupon.status, 201, withCoupon.body);
+    assert.equal(withCoupon.json.id, deriveSpaceId(strangerKey.controller));
+    assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${withCoupon.json.id}`).provisioning.S, "coupon");
+    assert.equal(await readCouponlessCount(), 2);
+    // ... and deleting it changes nothing
+    const couponGone = await invoke({ method: "DELETE", path: `/space/${withCoupon.json.id}/` });
+    assert.equal(couponGone.status, 204);
+    assert.equal(await readCouponlessCount(), 2);
+    // A cap of 0 closes the path
+    process.env.MAX_COUPONLESS_SPACES = "0";
+    const closed = await createUnlockSpace(await keyFromSeed("unlock-four-0000000000000000000000"));
+    assert.equal(closed.status, 507);
+  } finally {
+    delete process.env.MAX_COUPONLESS_SPACES;
+  }
+});
+
+test("a whole-registry sweep recounts the coupon-less Spaces and backfills provisioning on older rows", async () => {
+  const legacyUnlock = deriveSpaceId(strangerKey.controller);
+  await seedSpace(fakes, { spaceId: legacyUnlock, controller: strangerKey.controller, type: ["AuxiliarySpace", "Space", "UnlockSpace"] });
+  // The seeded test Space and this one are legacy coupon rows (server-assigned ids, no attribute)
+  await seedSpace(fakes, { spaceId: SPACE_B });
+  const recorded = "bq0CrK85pRtRxqriiwnrAJg5smqsPaXrVs-EsEWJYTI";
+  await seedSpace(fakes, { spaceId: recorded });
+  fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${recorded}`).provisioning = { S: "coupon" };
+  const report = await sweep({});
+  assert.deepEqual(report.couponlessSpaces, { count: 1, max: 200 });
+  assert.equal(await readCouponlessCount(), 1);
+  const rows = fakes.dynamo.tables["was-spaces"];
+  assert.equal(rows.get(`${BASE}/space/${legacyUnlock}`).provisioning.S, "derived");
+  assert.equal(rows.get(`${BASE}/space/${SPACE}`).provisioning.S, "coupon");
+  assert.equal(rows.get(`${BASE}/space/${recorded}`).provisioning.S, "coupon");
+  // The counter row is not a Space: no bucket sweep for it, and listings ignore it
+  assert.ok(!(COUNTER_KEY in report));
+  const spaces = await invoke({ path: "/spaces/" });
+  assert.ok(spaces.json.items.every((item) => item.id !== COUNTER_KEY));
+});
+
+test("the quota watch publishes the bucket and coupon-less counts", async () => {
+  await createUnlockSpace(strangerKey);
+  const report = await quotaWatch();
+  assert.equal(report.couponlessSpaces, 1);
+  assert.equal(report.max, 200);
+  assert.equal(report.buckets, [...fakes.s3.buckets.keys()].filter((name) => name.startsWith("dcc-was-")).length);
+  const published = Object.fromEntries(fakes.cloudwatch.metrics.map((metric) => [metric.MetricName, metric.Value]));
+  assert.deepEqual(published, { SpaceBuckets: report.buckets, CouponlessSpaces: 1 });
+  assert.ok(fakes.cloudwatch.metrics.every((metric) => metric.namespace === "WasServer"));
 });

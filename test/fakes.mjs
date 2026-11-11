@@ -14,6 +14,7 @@ const rootRequire = createRequire(new URL("../package.json", import.meta.url));
 const s3 = rootRequire("@aws-sdk/client-s3");
 const ddb = rootRequire("@aws-sdk/client-dynamodb");
 const sqs = rootRequire("@aws-sdk/client-sqs");
+const cloudwatch = rootRequire("@aws-sdk/client-cloudwatch");
 // The authorizer carries its own copy of the DynamoDB client.
 const authorizerRequire = createRequire(new URL("../src/authorizer/package.json", import.meta.url));
 const authorizerDdb = authorizerRequire("@aws-sdk/client-dynamodb");
@@ -51,6 +52,8 @@ export class FakeS3 {
       case "CreateBucketCommand":
         this.buckets.set(input.Bucket, new Map());
         return {};
+      case "ListBucketsCommand":
+        return { Buckets: [...this.buckets.keys()].map((Name) => ({ Name })) };
       case "DeleteBucketCommand":
         this.bucket(input.Bucket);
         this.buckets.delete(input.Bucket);
@@ -281,6 +284,9 @@ export class FakeDynamo {
     switch (command.constructor.name) {
       case "GetItemCommand":
         return { Item: this.table(input.TableName).get(this.keyOf(input)) };
+      // The whole table in one page (the sweep's registry scan)
+      case "ScanCommand":
+        return { Items: [...this.table(input.TableName).values()] };
       case "PutItemCommand": {
         const key = Object.values(input.Item)[0].S;
         // attribute_not_exists(<key attribute>): a conditional create
@@ -297,6 +303,31 @@ export class FakeDynamo {
         const table = this.table(input.TableName);
         const key = this.keyOf(input);
         const item = table.get(key);
+        // ADD #field :delta, with the two conditions the counters use:
+        // `attribute_not_exists(#f) OR #f < :max` and `#f > :zero`
+        if (input.UpdateExpression.startsWith("ADD ")) {
+          const names = input.ExpressionAttributeNames ?? {};
+          const values = input.ExpressionAttributeValues ?? {};
+          const [, lhs, rhs] = input.UpdateExpression.match(/^ADD\s+(\S+)\s+(\S+)/);
+          const field = names[lhs] ?? lhs;
+          const current = item?.[field]?.N;
+          if (input.ConditionExpression) {
+            const absentOk = /attribute_not_exists\(/.test(input.ConditionExpression) && current === undefined;
+            const comparison = input.ConditionExpression.match(/\S+\s*([<>])\s*(:\w+)/);
+            let ok = absentOk;
+            if (!ok && comparison) {
+              const bound = Number(values[comparison[2]].N);
+              const value = Number(current ?? 0);
+              ok = comparison[1] === "<" ? value < bound : value > bound;
+            }
+            if (!ok) {
+              throw awsError("ConditionalCheckFailedException", 400);
+            }
+          }
+          const next = { ...(item ?? { spaceURL: { S: key } }), [field]: { N: String(Number(current ?? 0) + Number(values[rhs].N)) } };
+          table.set(key, next);
+          return { Attributes: next };
+        }
         if (input.UpdateExpression.startsWith("SET usesRemaining")) {
           const remaining = Number(item?.usesRemaining?.N ?? 0);
           if (remaining <= 0) {
@@ -345,14 +376,29 @@ export class FakeDynamo {
   }
 }
 
+// The metrics the quota watch publishes.
+export class FakeCloudWatch {
+  metrics = [];
+
+  async send(command) {
+    if (command.constructor.name === "PutMetricDataCommand") {
+      this.metrics.push(...command.input.MetricData.map((datum) => ({ namespace: command.input.Namespace, ...datum })));
+      return {};
+    }
+    throw new Error(`FakeCloudWatch: unsupported command ${command.constructor.name}`);
+  }
+}
+
 // Installs fresh fakes and returns them.
 export function installFakes() {
   const fakeS3 = new FakeS3();
   const fakeDynamo = new FakeDynamo();
   const fakeSqs = new FakeSqs();
+  const fakeCloudWatch = new FakeCloudWatch();
   s3.S3Client.prototype.send = (command) => fakeS3.send(command);
   ddb.DynamoDBClient.prototype.send = (command) => fakeDynamo.send(command);
   authorizerDdb.DynamoDBClient.prototype.send = (command) => fakeDynamo.send(command);
   sqs.SQSClient.prototype.send = (command) => fakeSqs.send(command);
-  return { s3: fakeS3, dynamo: fakeDynamo, sqs: fakeSqs };
+  cloudwatch.CloudWatchClient.prototype.send = (command) => fakeCloudWatch.send(command);
+  return { s3: fakeS3, dynamo: fakeDynamo, sqs: fakeSqs, cloudwatch: fakeCloudWatch };
 }
