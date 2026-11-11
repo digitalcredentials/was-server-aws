@@ -31,6 +31,19 @@ Parameters:
     Type: String
     Description: Route 53 hosted zone the IdDomain alias records go in.
     Default: Z04250862QG6MQUAE24XV
+  OpenProvisioning:
+    Type: String
+    Description: >-
+      "true" lets any did:key create a Space by id with PUT /space/{id}/meta
+      and If-None-Match: * (the reference client's create-by-id, which a
+      FreeWallet account needs), within MaxSpacesPerController; "false" keeps
+      Space creation to POST /spaces/ with a coupon and the unlock Spaces.
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  MaxSpacesPerController:
+    Type: String
+    Description: How many Spaces one did:key may create by id under open provisioning.
+    Default: "20"
 
 Globals:
   Function:
@@ -48,6 +61,9 @@ Globals:
         INSTANCE_VERSION: '0.5.0'
         FEED_TABLE_NAME: !Ref WasFeedTable
         FEED_QUEUE_URL: !Ref FeedQueue
+        API_HOST: !Ref ApiDomain
+        OPEN_PROVISIONING: !Ref OpenProvisioning
+        MAX_SPACES_PER_CONTROLLER: !Ref MaxSpacesPerController
 
 Resources:
   # Space-creation coupons, owned by this stack: one row per coupon string.
@@ -411,10 +427,10 @@ Resources:
               Condition:
                 StringLike:
                   s3:prefix:
-                  - collections/id/did.jsonl
+                  - collections/*/did.jsonl
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/collections/id/did.jsonl
+              Resource: arn:aws:s3:::dcc-was-*/collections/*/did.jsonl
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -712,7 +728,7 @@ Resources:
                 StringLike:
                   s3:prefix:
                   - meta/space.json
-                  - collections/id/did.jsonl
+                  - collections/*/did.jsonl
         - Statement:
             # UpdateItem mirrors the name and records a promoted controller;
             # PutItem and CreateBucket provision an unlock Space.
@@ -721,6 +737,10 @@ Resources:
                 - dynamodb:UpdateItem
                 - dynamodb:PutItem
               Resource: !GetAtt WasSpacesTable.Arn
+            # The per-controller cap of open provisioning counts by DID
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !Sub "${WasSpacesTable.Arn}/index/by-did"
             - Effect: Allow
               Action:
                 - s3:CreateBucket
@@ -731,9 +751,11 @@ Resources:
                 - s3:GetObject
                 - s3:PutObject
               Resource: arn:aws:s3:::dcc-was-*/meta/space.json
+            # A promotion resolves the did:webvh's log, in `id` or, for the
+            # self-hosted form, in the Collection the DID names
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/collections/id/did.jsonl
+              Resource: arn:aws:s3:::dcc-was-*/collections/*/did.jsonl
       Events:
         Put:
           Type: HttpApi
