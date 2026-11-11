@@ -3,6 +3,7 @@ import { DeleteBucketCommand } from "@aws-sdk/client-s3";
 import { handler } from "was-lib/handler.mjs";
 import { noContent, NO_STORE } from "was-lib/http.mjs";
 import { s3, isNoBucket, deletePrefix, bucketOf } from "was-lib/store.mjs";
+import { purgeBucket } from "was-lib/feed.mjs";
 
 // DELETE /space/{s}/ -- the whole Space: its bucket (emptied first) and its
 // registry row. Root capability only (the container rule). An
@@ -25,6 +26,9 @@ export const lambdaHandler = handler(
     await dynamo.send(
       new DeleteItemCommand({ TableName: SPACES_TABLE, Key: { spaceURL: { S: registryUrl } } })
     );
+    // The Collections' feeds go with the Space (a re-created unlock Space
+    // reuses the bucket name)
+    await purgeBucket(bucketOf(spaceId));
     return noContent(req, NO_STORE);
   },
   { scope: "space", rootOnly: true }

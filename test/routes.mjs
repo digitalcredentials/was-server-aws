@@ -35,6 +35,7 @@ export const routes = [
   { methods: ["GET", "HEAD"], path: `${C}/meta`, fn: "collection/meta-get" },
   { methods: ["PUT"], path: `${C}/meta`, fn: "collection/meta-put" },
   { methods: ["GET", "HEAD"], path: `${C}/meta/log`, fn: "collection/log-get" },
+  { methods: ["POST", "GET"], path: `${C}/query`, fn: "collection/query" },
   { methods: ["PUT"], path: `${C}/meta/log`, fn: "collection/log-put" },
   { methods: ["GET", "HEAD"], path: `${C}/policy`, fn: "collection/policy-get" },
   { methods: ["PUT"], path: `${C}/policy`, fn: "collection/policy-put" },
