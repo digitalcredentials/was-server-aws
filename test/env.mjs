@@ -6,3 +6,5 @@ process.env.INSTANCE_VERSION = "test";
 process.env.ID_DOMAIN = "id.test";
 // The feed queue the sweep hands its synthetic events to (a fake in tests)
 process.env.FEED_QUEUE_URL = "https://sqs.test/was-feed.fifo";
+// This server's own host, for the self-hosted did:webvh form
+process.env.API_HOST = "localhost:3000";

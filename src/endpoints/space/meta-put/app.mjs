@@ -1,12 +1,12 @@
-import { DynamoDBClient, PutItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient, PutItemCommand, UpdateItemCommand, QueryCommand } from "@aws-sdk/client-dynamodb";
 import { CreateBucketCommand, PutBucketNotificationConfigurationCommand } from "@aws-sdk/client-s3";
 import * as webvhDriver from "@interop/did-method-webvh";
 import { handler } from "was-lib/handler.mjs";
 import { json, parseJsonBody, preconditions, NO_STORE } from "was-lib/http.mjs";
 import { readSpaceMeta, writeSpaceMeta, now, stripServerManaged, typesOf } from "was-lib/meta.mjs";
 import { s3, bucketOf } from "was-lib/store.mjs";
-import { isSelfProvisionedSpaceId } from "was-lib/ids.mjs";
-import { controllerMismatch, invalidRequestBody, notFound } from "was-lib/problems.mjs";
+import { isSelfProvisionedSpaceId, isReservedSpaceId } from "was-lib/ids.mjs";
+import { controllerMismatch, invalidRequestBody, notFound, quotaExceeded, reservedId } from "was-lib/problems.mjs";
 import { deriveSpaceId, invokerKeyListed, isWebvhDid, resolveWebvhDocument } from "was-lib/webvh.mjs";
 
 // PUT /space/{s}/meta -- a full replacement of the writable members, under
@@ -16,11 +16,15 @@ import { deriveSpaceId, invokerKeyListed, isWebvhDid, resolveWebvhDocument } fro
 //
 // Two cases beyond the plain replacement:
 //
-//   - Provisioning an unlock Space. A PUT on a Space the registry does not
+//   - Provisioning a Space by id. A PUT on a Space the registry does not
 //     hold, whose id is was-client's `deriveSpaceId` over the signing did:key
 //     and whose body names that did:key as controller with `UnlockSpace` in
-//     its type, creates the Space (bucket, metadata, registry row). No
+//     its type, creates an unlock Space (bucket, metadata, registry row). No
 //     coupon: the id is bound to the key, so nothing else can be claimed.
+//     With open provisioning (`OPEN_PROVISIONING=true`) a did:key may also
+//     create any Space by id with `If-None-Match: *` and itself as
+//     controller, within a per-controller cap: the reference client's
+//     create-by-id, which a FreeWallet account needs.
 //   - Promoting the controller. A body naming a did:webvh as controller,
 //     where the Space's controller is a did:key, is accepted when the
 //     did:webvh's current document lists the invoking key under
@@ -88,18 +92,58 @@ function validateBody(req, spaceId) {
   return body;
 }
 
-async function provisionUnlockSpace(req, { spaceId }, body) {
+// How many Spaces one controller DID may create by id under open
+// provisioning (the reference server's default-on count quota).
+const maxSpacesPerController = () => Number(process.env.MAX_SPACES_PER_CONTROLLER ?? "20");
+
+async function spacesOf(controller) {
+  let count = 0;
+  let cursor;
+  do {
+    const out = await dynamo.send(
+      new QueryCommand({
+        TableName: SPACES_TABLE,
+        IndexName: "by-did",
+        KeyConditionExpression: "did = :did",
+        ExpressionAttributeValues: { ":did": { S: controller } },
+        Select: "COUNT",
+        ...(cursor && { ExclusiveStartKey: cursor }),
+      })
+    );
+    count += out.Count ?? out.Items?.length ?? 0;
+    cursor = out.LastEvaluatedKey;
+  } while (cursor);
+  return count;
+}
+
+// Provisions a Space by id: an unlock Space (its id derived from the
+// signing DID, `UnlockSpace` in its type, no coupon and no cap) or, under
+// open provisioning, any Space the signing did:key creates with
+// `If-None-Match: *` and itself as controller, within the per-controller
+// cap. The reference client creates the account Space this way.
+async function provisionSpaceById(req, { spaceId }, body) {
   const invoker = req.auth.controller;
   const controller = body.controller?.split("#")[0];
-  if (!isSelfProvisionedSpaceId(spaceId) || spaceId !== deriveSpaceId(invoker)) {
-    throw notFound();
+  const derived = isSelfProvisionedSpaceId(spaceId) && spaceId === deriveSpaceId(invoker);
+  if (!derived) {
+    if (process.env.OPEN_PROVISIONING !== "true" || preconditions(req).ifNoneMatch !== "*") {
+      throw notFound();
+    }
+    if (isReservedSpaceId(spaceId)) {
+      throw reservedId(spaceId);
+    }
   }
   if (controller !== invoker) {
-    throw controllerMismatch("An unlock Space's controller is the DID its id is derived from.");
+    throw controllerMismatch(
+      derived ? "An unlock Space's controller is the DID its id is derived from." : "A Space created by id is controlled by the DID that creates it."
+    );
   }
   const type = typesOf(body, "Space");
-  if (!type.includes(UNLOCK_TYPE)) {
+  if (derived && !type.includes(UNLOCK_TYPE)) {
     throw invalidRequestBody(`A self-provisioned Space must carry "${UNLOCK_TYPE}" in its type.`);
+  }
+  if (!derived && (await spacesOf(controller)) >= maxSpacesPerController()) {
+    throw quotaExceeded(`${controller} already controls ${maxSpacesPerController()} Spaces, the most this server allows.`);
   }
   const stamp = now();
   const doc = {
@@ -144,7 +188,7 @@ export const lambdaHandler = handler(
     const { spaceId, registryUrl } = route;
     const body = validateBody(req, spaceId);
     if (route.unregistered) {
-      return provisionUnlockSpace(req, route, body);
+      return provisionSpaceById(req, route, body);
     }
     const controller = await resolveController(req, body);
     const current = await readSpaceMeta(req, spaceId);

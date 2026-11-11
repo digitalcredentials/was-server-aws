@@ -245,11 +245,14 @@ test("PUT /space/{s}/meta refuses a controller change and a type change", async 
   assert.equal(type.status, 400);
 });
 
-test("unimplemented reserved endpoints answer 405", async () => {
-  for (const path of [`/space/${SPACE}/linkset`, `/space/${SPACE}/quotas`, `/space/${SPACE}/c/r/chunks/0`]) {
+test("unimplemented optional sections answer 501, undefined methods at reserved endpoints 405", async () => {
+  for (const path of [`/space/${SPACE}/linkset`, `/space/${SPACE}/quotas`, `/space/${SPACE}/c/r/chunks/0`, `/space/${SPACE}/zcaps/revocations/x`]) {
     const res = await invoke({ path });
-    assert.equal(res.status, 405, path);
+    assert.equal(res.status, 501, path);
+    assert.equal(res.json.type, "https://w3id.org/pws#unsupported-operation");
   }
+  const method = await invoke({ method: "DELETE", path: `/space/${SPACE}/c/meta/x` });
+  assert.equal(method.status, 405);
 });
 
 // --- collections -----------------------------------------------------------------
@@ -1466,4 +1469,100 @@ test("the sweep queues an event for every record the feed lacks or has wrong", a
     await applyObjectEvent({ bucket: SPACE, key: body.detail.object.key, deleted: body["detail-type"] === "Object Deleted", etag: body.detail.object.etag, time: body.time });
   }
   assert.deepEqual(await sweepBucket(SPACE), []);
+});
+
+// --- self-hosted did:webvh and provisioning by id ------------------------------------
+
+test("a did:webvh hosted on this server's own host resolves from the Collection it names", async () => {
+  // The reference client's form: did:webvh:{scid}:{host}:space:{id}:{collection}
+  const account = await mintWebvh({ domain: "localhost%3A3000", path: "space", keys: [] });
+  // mintWebvh takes one path segment; build the three-segment form directly
+  const { createDID, logToJsonlString } = await import("@interop/did-method-webvh");
+  const multibase = controllerKey.fingerprint();
+  const { did, log } = await createDID({
+    address: "localhost%3A3000",
+    paths: ["space", SPACE, "id"],
+    signer: signerFromDidKeySigner(controllerKey.signer()),
+    updateKeys: [`did:key:${multibase}`],
+    verificationMethods: [{ type: "Multikey", publicKeyMultibase: multibase }],
+    vmIdFragment: "multibase",
+    portable: true,
+    authentication: [`#${multibase}`],
+    assertionMethod: [`#${multibase}`],
+    capabilityInvocation: [`#${multibase}`],
+    capabilityDelegation: [`#${multibase}`],
+  });
+  assert.ok(did.includes(":localhost%3A3000:space:"), did);
+  assert.ok(account.did, "the single-segment mint still works");
+  await seedWebvhLog(fakes, SPACE, logToJsonlString(log));
+  const current = await invoke({ path: `/space/${SPACE}/meta` });
+  const promoted = await invoke({
+    method: "PUT",
+    path: `/space/${SPACE}/meta`,
+    json: { name: "Test Space", controller: did },
+    headers: { "if-match": current.headers.etag },
+  });
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.json));
+  const asAccount = await invoke({ path: `/space/${SPACE}/meta`, signer: asWebvh(controllerKey, did) });
+  assert.equal(asAccount.status, 200);
+  assert.equal(asAccount.json.controller, did);
+});
+
+test("with open provisioning a did:key creates a Space by id, within its cap; without it the PUT is a 404", async () => {
+  const id = "p".repeat(43);
+  const body = { id, name: "Wallet Space", controller: controllerKey.controller };
+  const closed = await invoke({ method: "PUT", path: `/space/${id}/meta`, json: body, headers: { "if-none-match": "*" } });
+  assert.equal(closed.status, 404);
+  process.env.OPEN_PROVISIONING = "true";
+  process.env.MAX_SPACES_PER_CONTROLLER = "2";
+  try {
+    const created = await invoke({ method: "PUT", path: `/space/${id}/meta`, json: body, headers: { "if-none-match": "*" } });
+    assert.equal(created.status, 201, created.body);
+    assert.deepEqual(created.json.type, ["Space"]);
+    assert.equal(created.json.controller, controllerKey.controller);
+    assert.ok(fakes.s3.buckets.has(bucketOf(id)));
+    assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${id}`).did.S, controllerKey.controller);
+    // The Space answers to its controller from then on
+    const read = await invoke({ path: `/space/${id}/meta` });
+    assert.equal(read.status, 200);
+    // A second create of the same id is refused
+    const again = await invoke({ method: "PUT", path: `/space/${id}/meta`, json: body, headers: { "if-none-match": "*" } });
+    assert.equal(again.status, 412);
+    // Without the guarded-create precondition nothing is provisioned
+    const unguarded = await invoke({ method: "PUT", path: `/space/${"q".repeat(43)}/meta`, json: { ...body, id: "q".repeat(43) } });
+    assert.equal(unguarded.status, 404);
+    // The controller is the creating key
+    const other = await invoke({
+      method: "PUT",
+      path: `/space/${"r".repeat(43)}/meta`,
+      json: { id: "r".repeat(43), controller: strangerKey.controller },
+      headers: { "if-none-match": "*" },
+    });
+    assert.equal(other.status, 400);
+    assert.equal(other.json.type, "https://w3id.org/pws#controller-mismatch");
+    // The reserved id (not a Space id form this server accepts at all)
+    const server = await invoke({ method: "PUT", path: `/space/server/meta`, json: { id: "server", controller: controllerKey.controller }, headers: { "if-none-match": "*" } });
+    assert.equal(server.status, 404);
+    // The cap: the seeded test Space plus the new one make two
+    const third = await invoke({
+      method: "PUT",
+      path: `/space/${"s".repeat(43)}/meta`,
+      json: { id: "s".repeat(43), controller: controllerKey.controller },
+      headers: { "if-none-match": "*" },
+    });
+    assert.equal(third.status, 507);
+    assert.equal(third.json.type, "https://w3id.org/pws#quota-exceeded");
+    // Only a did:key creates by id
+    const asWebvhKey = await invoke({
+      method: "PUT",
+      path: `/space/${"t".repeat(43)}/meta`,
+      json: { id: "t".repeat(43), controller: "did:webvh:QmX:localhost%3A3000:space:x:id" },
+      headers: { "if-none-match": "*" },
+      signer: asWebvh(controllerKey, "did:webvh:QmX:localhost%3A3000:space:x:id"),
+    });
+    assert.equal(asWebvhKey.status, 404);
+  } finally {
+    delete process.env.OPEN_PROVISIONING;
+    delete process.env.MAX_SPACES_PER_CONTROLLER;
+  }
 });

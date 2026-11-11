@@ -105,8 +105,16 @@ export const lambdaHandler = async (event) => {
   } else if (ids[0] === "space" && ids[1]) {
     const space = await getSpace(`${base}/space/${ids[1]}`);
     if (!space) {
+      // A Space the registry does not hold may be about to be provisioned
+      // by id: an unlock Space, whose id is derived from the signing DID; or,
+      // with open provisioning, any Space a did:key creates with a `PUT` of
+      // its metadata object (the reference client's create-by-id). Either
+      // way the invocation is verified against the signer, and the handler
+      // compares the stated controller to it.
       const signer = authorization ? signerDid(authorization) : undefined;
-      if (signer && ids[1] === deriveSpaceId(signer)) {
+      const createByIdPut = method === "PUT" && ids.length === 3 && ids[2] === "meta";
+      const open = process.env.OPEN_PROVISIONING === "true" && createByIdPut && signer?.startsWith("did:key:");
+      if (signer && (ids[1] === deriveSpaceId(signer) || open)) {
         context.space = "unregistered";
         context.spaceController = signer;
         context.spaceType = JSON.stringify(["Space"]);

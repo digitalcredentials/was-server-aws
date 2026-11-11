@@ -43,7 +43,7 @@ to the canonical one.
 | DELETE | `/space/{s}/{c}/{r}` | `ResourceDeleteFn` | delete it (permanently) |
 | GET / PUT | `/space/{s}/{c}/{r}/meta` | `ResourceMeta{Get,Put}Fn` | Resource Metadata (derived fields + `custom`) |
 | GET / PUT / DELETE | `/space/{s}/{c}/{r}/policy` | `ResourcePolicy{Get,Put,Delete}Fn` | the Resource's policy |
-| anything else | | `DefaultFn` | `308` for the bare Space URL, `405` for reserved segments not implemented (`linkset`, `quotas`, `meta/log`, `chunks`, ...), else `404` |
+| anything else | | `DefaultFn` | `308` for the bare Space URL, `501` for optional sections not implemented (`linkset`, `quotas`, `backends`, `replicas`, `chunks`, `zcaps`), `405` for an undefined method at a reserved endpoint, else `404` |
 
 **Trailing slashes.** The gateway matches `/space/{s}/` to the
 `/space/{space_id}/{collection_id}` route with an empty `collection_id`,
@@ -121,6 +121,29 @@ The archive is built in memory and returned as one response. API Gateway
 carries at most 6 MB after base64 encoding, so an archive over 4 MB is refused
 with `413 payload-too-large`; larger Spaces will need a presigned-URL
 hand-off.
+
+### Provisioning a Space by id
+
+Besides `POST /spaces/` (a coupon, a server-assigned id) and the unlock
+Spaces (an id derived from the signing did:key), the stack can let any
+did:key create a Space by id: `PUT /space/{id}/meta` with
+`If-None-Match: *` and a body naming the key as `controller`, which is how
+the reference client (pws-client, wallet-core, FreeWallet) creates an
+account Space. It is off by default; the `OpenProvisioning` parameter
+(`"true"`) turns it on, and `MaxSpacesPerController` (default 20) caps how
+many Spaces one key may create that way (507 `quota-exceeded` past it).
+The id `server` is reserved. The authorizer verifies such a request as a
+root invocation of the signer, and the handler requires the stated
+controller to be that signer.
+
+### Self-hosted did:webvh
+
+A did:webvh whose location names this server's own host and a Collection,
+`did:webvh:{scid}:{ApiDomain}:space:{space_id}:{collection_id}` (a port as
+`%3A`), resolves from that Collection's `did.jsonl` in the bucket, as the
+identity-domain form does from `id`. This is the form the reference client
+mints for an account (`...:space:{id}:id`) and for a client-annex
+generation (`...:space:{annex}:gen-...`).
 
 ### Governing history logs
 
