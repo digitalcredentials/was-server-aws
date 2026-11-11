@@ -243,7 +243,7 @@ test("PUT /space/{s}/meta refuses a controller change and a type change", async 
 });
 
 test("unimplemented reserved endpoints answer 405", async () => {
-  for (const path of [`/space/${SPACE}/linkset`, `/space/${SPACE}/quotas`, `/space/${SPACE}/c/meta/log`, `/space/${SPACE}/c/r/chunks/0`]) {
+  for (const path of [`/space/${SPACE}/linkset`, `/space/${SPACE}/quotas`, `/space/${SPACE}/c/r/chunks/0`]) {
     const res = await invoke({ path });
     assert.equal(res.status, 405, path);
   }
@@ -320,7 +320,16 @@ test("Collection Metadata: GET, replace under If-Match, create with If-None-Matc
   const replaced = await invoke({
     method: "PUT",
     path: `/space/${SPACE}/vault/meta`,
-    json: { id: "vault", name: "Vault 2", custom: { name: "My vault" }, encryption: { scheme: "edv", currentEpoch: "e1", epochs: [] } },
+    json: {
+      id: "vault",
+      name: "Vault 2",
+      custom: { name: "My vault" },
+      encryption: {
+        scheme: "edv",
+        currentEpoch: "e1",
+        epochs: [{ id: "e1", recipients: [{ header: { kid: "did:key:z6MkReader#z6LSReader", alg: "ECDH-ES+A256KW" }, encrypted_key: "AAAA" }] }],
+      },
+    },
     headers: { "if-match": read.headers.etag },
   });
   assert.equal(replaced.status, 200, JSON.stringify(replaced.json));
@@ -957,6 +966,8 @@ test("POST /space/{s}/import merges an archive, skips what is held, and reports 
     resourcesSkipped: 0,
     policiesCreated: 3,
     policiesSkipped: 0,
+    logsCreated: 0,
+    logsSkipped: 0,
     spaceMetadata: "restored",
     provenance: { verified: 0, unattested: 6, proofInvalid: 0, contentMismatch: 0, unknownSigner: 0 },
   });
@@ -1016,4 +1027,206 @@ test("import under a delegated capability leaves the Space Metadata alone; a typ
   assert.equal(junk.status, 400);
   const empty = await invoke({ method: "POST", path: `/space/${SPACE_B}/import` });
   assert.equal(empty.status, 400);
+});
+
+// --- governing history logs ----------------------------------------------------
+
+const LOG_TYPE = "text/jsonl";
+const logPath = (c) => `/space/${SPACE}/${c}/meta/log`;
+const recipient = { header: { kid: "did:key:z6MkReader#z6LSReader", alg: "ECDH-ES+A256KW" }, encrypted_key: "AAAA" };
+const descriptor = (ids, current, extra = {}) => ({
+  type: "WasEpochConfiguration",
+  scheme: "edv",
+  epochs: ids.map((id) => ({ id, recipients: [recipient] })),
+  currentEpoch: current,
+  ...extra,
+});
+const entryLine = (n, state, parameters = {}) =>
+  JSON.stringify({ versionId: `${n}-Qm${n}`, versionTime: "2026-11-11T00:00:00Z", parameters, state, proof: [] });
+const genesisLine = (state) => entryLine(1, state, { method: "resource-log:0.1", scid: "QmScid" });
+const putLog = (c, body, headers, signer) =>
+  invoke({ method: "PUT", path: logPath(c), body, contentType: LOG_TYPE, headers, ...(signer !== undefined && { signer }) });
+
+async function governedCollection(c = "gov") {
+  await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: c } });
+  const created = await putLog(c, genesisLine(descriptor(["e1"], "e1")) + "\n", { "if-none-match": "*" });
+  assert.equal(created.status, 204, created.body);
+  return created.headers.etag;
+}
+
+test("PUT meta/log with If-None-Match: * declares the Collection governed and the descriptor is derived from the head", async () => {
+  const etag = await governedCollection();
+  assert.ok(etag);
+  const meta = await invoke({ path: `/space/${SPACE}/gov/meta` });
+  assert.equal(meta.status, 200);
+  assert.deepEqual(meta.json.encryption, {
+    ...descriptor(["e1"], "e1"),
+    history: { method: "resource-log:0.1", resource: `${SPACE_URL}gov/meta/log` },
+  });
+  assert.equal(meta.json.revisions, undefined);
+  // The stored object holds no copy of the derived member
+  assert.equal(JSON.parse(fakes.s3.buckets.get(SPACE).get("meta/gov.json").body).encryption, undefined);
+  // The log reads back verbatim, as JSON Lines with its own validator
+  const log = await invoke({ path: logPath("gov") });
+  assert.equal(log.status, 200);
+  assert.equal(log.headers["content-type"], LOG_TYPE);
+  assert.equal(log.headers.etag, etag);
+  assert.equal(log.body, genesisLine(descriptor(["e1"], "e1")) + "\n");
+  const cached = await invoke({ path: logPath("gov"), headers: { "if-none-match": etag } });
+  assert.equal(cached.status, 304);
+  // The listing carries the derived descriptor too
+  const listing = await invoke({ path: `/space/${SPACE}/` });
+  assert.equal(listing.json.items.find((item) => item.id === "gov").encryption.currentEpoch, "e1");
+  // A second declaring create is refused: the log exists
+  const again = await putLog("gov", genesisLine(descriptor(["e1"], "e1")), { "if-none-match": "*" });
+  assert.equal(again.status, 412);
+  assert.ok(await invoke({ path: "/service", signer: null }).then((res) => res.json.specs["https://w3id.org/pws/encrypted-collections"][0].features.includes("governed-history-logs")));
+});
+
+test("a log write needs the Collection, a precondition and a body that keeps the line contract", async () => {
+  const missing = await putLog("nothing", genesisLine(descriptor(["e1"], "e1")), { "if-none-match": "*" });
+  assert.equal(missing.status, 404);
+  await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: "gov" } });
+  const bare = await putLog("gov", genesisLine(descriptor(["e1"], "e1")), {});
+  assert.equal(bare.status, 400);
+  const empty = await invoke({ method: "PUT", path: logPath("gov"), headers: { "if-none-match": "*" } });
+  assert.equal(empty.status, 400);
+  const notObject = await putLog("gov", "[1,2]\n", { "if-none-match": "*" });
+  assert.equal(notObject.status, 400);
+  assert.equal(notObject.json.type, "https://w3id.org/pws#invalid-request-body");
+  const noState = await putLog("gov", JSON.stringify({ versionId: "1-x", parameters: {}, proof: [] }), { "if-none-match": "*" });
+  assert.equal(noState.status, 400);
+  const blank = await putLog("gov", genesisLine(descriptor(["e1"], "e1")) + "\n\n" + entryLine(2, descriptor(["e1"], "e1")), { "if-none-match": "*" });
+  assert.equal(blank.status, 400);
+  const badShape = await putLog("gov", genesisLine({ type: "WasEpochConfiguration", scheme: "edv", epochs: [] }), { "if-none-match": "*" });
+  assert.equal(badShape.status, 400);
+  // Nothing was written
+  assert.equal((await invoke({ path: logPath("gov") })).status, 404);
+});
+
+test("an append carries the stored log verbatim plus exactly one line, under If-Match, keeping the epoch invariants", async () => {
+  const etag = await governedCollection();
+  const metaBefore = await invoke({ path: `/space/${SPACE}/gov/meta` });
+  const first = genesisLine(descriptor(["e1"], "e1"));
+  const rotated = entryLine(2, descriptor(["e1", "e2"], "e2"));
+
+  const stale = await putLog("gov", `${first}\n${rotated}\n`, { "if-match": '"not-it"' });
+  assert.equal(stale.status, 412);
+  const rewritten = await putLog("gov", `${entryLine(1, descriptor(["e9"], "e9"), { method: "resource-log:0.1", scid: "Qm" })}\n${rotated}\n`, { "if-match": etag });
+  assert.equal(rewritten.status, 412);
+  const nothingNew = await putLog("gov", `${first}\n`, { "if-match": etag });
+  assert.equal(nothingNew.status, 400);
+  const twoNew = await putLog("gov", `${first}\n${rotated}\n${entryLine(3, descriptor(["e1", "e2"], "e2"))}\n`, { "if-match": etag });
+  assert.equal(twoNew.status, 400);
+  const dropped = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e2"], "e2"))}\n`, { "if-match": etag });
+  assert.equal(dropped.status, 409);
+  assert.equal(dropped.json.type, "https://w3id.org/pws#encryption-immutable");
+  const backwards = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e1", "e2"], "e1"))}\n`, { "if-match": etag });
+  assert.equal(backwards.status, 204, "a new epoch that is not current is still an append");
+  const etag2 = backwards.headers.etag;
+  const reverted = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e1", "e2"], "e1"))}\n${entryLine(3, descriptor(["e1", "e2", "e3"], "e3"))}\n${entryLine(4, descriptor(["e1", "e2", "e3"], "e1"))}\n`, { "if-match": etag2 });
+  assert.equal(reverted.status, 400, "two lines at once");
+  const forward = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e1", "e2"], "e1"))}\n${entryLine(3, descriptor(["e1", "e2", "e3"], "e3"))}\n`, { "if-match": etag2 });
+  assert.equal(forward.status, 204);
+  const etag3 = forward.headers.etag;
+  const moved = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e1", "e2"], "e1"))}\n${entryLine(3, descriptor(["e1", "e2", "e3"], "e3"))}\n${entryLine(4, descriptor(["e1", "e2", "e3"], "e1"))}\n`, { "if-match": etag3 });
+  assert.equal(moved.status, 409, "currentEpoch never moves backwards");
+  const scheme = await putLog("gov", `${first}\n${entryLine(2, descriptor(["e1", "e2"], "e1"))}\n${entryLine(3, descriptor(["e1", "e2", "e3"], "e3"))}\n${entryLine(4, { ...descriptor(["e1", "e2", "e3"], "e3"), scheme: "other" })}\n`, { "if-match": etag3 });
+  assert.equal(scheme.status, 409);
+
+  const meta = await invoke({ path: `/space/${SPACE}/gov/meta` });
+  assert.equal(meta.json.encryption.currentEpoch, "e3");
+  assert.notEqual(meta.headers.etag, metaBefore.headers.etag, "a log write advances the metadata validator");
+  const log = await invoke({ path: logPath("gov") });
+  assert.equal(log.body.split("\n").filter(Boolean).length, 3);
+});
+
+test("on a governed Collection the descriptor is read-only on the metadata path", async () => {
+  await governedCollection();
+  const meta = await invoke({ path: `/space/${SPACE}/gov/meta` });
+  const changed = await invoke({
+    method: "PUT",
+    path: `/space/${SPACE}/gov/meta`,
+    json: { ...meta.json, encryption: descriptor(["e1", "e2"], "e2") },
+    headers: { "if-match": meta.headers.etag },
+  });
+  assert.equal(changed.status, 409);
+  assert.equal(changed.json.type, "https://w3id.org/pws#encryption-history-log-governed");
+  // A read-modify-write that restates the served value passes, and the
+  // stored object still holds no descriptor
+  const restated = await invoke({
+    method: "PUT",
+    path: `/space/${SPACE}/gov/meta`,
+    json: { ...meta.json, name: "Governed" },
+    headers: { "if-match": meta.headers.etag },
+  });
+  assert.equal(restated.status, 200, restated.body);
+  assert.equal(restated.json.name, "Governed");
+  assert.equal(restated.json.encryption.currentEpoch, "e1");
+  assert.equal(JSON.parse(fakes.s3.buckets.get(SPACE).get("meta/gov.json").body).encryption, undefined);
+  const after = await invoke({ path: `/space/${SPACE}/gov/meta` });
+  assert.equal(after.json.name, "Governed");
+  assert.deepEqual(after.json.encryption, meta.json.encryption);
+});
+
+test("governance is refused where a client-written descriptor already stands, and a written descriptor keeps the epoch invariants", async () => {
+  const created = await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: "edv", encryption: { scheme: "edv" } } });
+  assert.equal(created.status, 201);
+  const declared = await putLog("edv", genesisLine(descriptor(["e1"], "e1")), { "if-none-match": "*" });
+  assert.equal(declared.status, 409);
+  assert.equal(declared.json.type, "https://w3id.org/pws#encryption-immutable");
+
+  const bad = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { encryption: { scheme: "edv", epochs: [{ id: "e1", recipients: [recipient] }] } } });
+  assert.equal(bad.status, 400, "epochs without currentEpoch");
+  const installed = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { encryption: descriptor(["e1"], "e1") } });
+  assert.equal(installed.status, 200, installed.body);
+  const dropped = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { encryption: descriptor(["e2"], "e2") } });
+  assert.equal(dropped.status, 409);
+  assert.equal(dropped.json.type, "https://w3id.org/pws#encryption-immutable");
+  const cleared = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { name: "plain" } });
+  assert.equal(cleared.status, 409);
+  const rotated = await invoke({ method: "PUT", path: `/space/${SPACE}/edv/meta`, json: { encryption: descriptor(["e1", "e2"], "e2") } });
+  assert.equal(rotated.status, 200, rotated.body);
+});
+
+test("the log is served under a public policy, hidden otherwise, and goes with its Collection", async () => {
+  await governedCollection();
+  const hidden = await invoke({ path: logPath("gov"), signer: null });
+  assert.equal(hidden.status, 404);
+  const stranger = await invoke({ path: logPath("gov"), signer: strangerKey });
+  assert.equal(stranger.status, 404);
+  await invoke({ method: "PUT", path: `/space/${SPACE}/gov/policy`, json: { type: "PublicCanRead" } });
+  const open = await invoke({ path: logPath("gov"), signer: null });
+  assert.equal(open.status, 200);
+  const unsignedWrite = await putLog("gov", "{}", { "if-match": open.headers.etag }, null);
+  assert.equal(unsignedWrite.status, 401);
+  const deleted = await invoke({ method: "DELETE", path: `/space/${SPACE}/gov/` });
+  assert.equal(deleted.status, 204);
+  assert.ok(!fakes.s3.buckets.get(SPACE).has("meta/gov.log"));
+});
+
+test("a Space archive carries a governing log, and an import restores it", async () => {
+  await governedCollection();
+  const exported = await invoke({ method: "POST", path: `/space/${SPACE}/export` });
+  assert.equal(exported.status, 200);
+  const { entries } = await archiveEntries(Buffer.from(exported.body, "base64"));
+  const dir = `space/${SPACE}/gov/`;
+  assert.ok(entries.has(`${dir}.collectionlog.gov.json`));
+  assert.equal(entries.get(`${dir}.collectionlog.gov.json`).toString("utf8"), genesisLine(descriptor(["e1"], "e1")) + "\n");
+  assert.equal(JSON.parse(entries.get(`${dir}.collection.meta.gov.json`).toString("utf8")).encryption, undefined);
+
+  await seedSpace(fakes, { spaceId: SPACE_B });
+  const imported = await invoke({
+    method: "POST",
+    path: `/space/${SPACE_B}/import`,
+    body: Buffer.from(exported.body, "base64"),
+    contentType: "application/x-tar",
+  });
+  assert.equal(imported.status, 200, imported.body);
+  assert.equal(imported.json.logsCreated, 1);
+  const meta = await invoke({ path: `/space/${SPACE_B}/gov/meta` });
+  assert.equal(meta.json.encryption.currentEpoch, "e1");
+  assert.equal(meta.json.encryption.history.resource, `${BASE}/space/${SPACE_B}/gov/meta/log`);
+  const again = await invoke({ method: "POST", path: `/space/${SPACE_B}/import`, body: Buffer.from(exported.body, "base64"), contentType: "application/x-tar" });
+  assert.equal(again.json.logsSkipped, 1);
 });

@@ -4,6 +4,7 @@ import { json, NO_STORE } from "was-lib/http.mjs";
 import { KEYS, getJson, headObject, putJson, putObject } from "was-lib/store.mjs";
 import { readSpaceMeta, writeSpaceMeta, hasContent, now, CONTENT_META } from "was-lib/meta.mjs";
 import { isReserved } from "was-lib/ids.mjs";
+import { parseLog, checkHeadState, writeCollectionLog } from "was-lib/history.mjs";
 import { invalidImport, missingContentType, notFound, unsupportedBackend } from "was-lib/problems.mjs";
 import {
   readSpaceArchive,
@@ -77,7 +78,7 @@ async function readArchive(body) {
   const collections = new Map();
   const collection = (id) => {
     if (!collections.has(id)) {
-      collections.set(id, { meta: undefined, policy: undefined, resources: new Map() });
+      collections.set(id, { meta: undefined, policy: undefined, log: undefined, resources: new Map() });
     }
     return collections.get(id);
   };
@@ -110,6 +111,9 @@ async function readArchive(body) {
       switch (kind.kind) {
         case "collectionMetadata":
           collection(position.collectionId).meta = collectionMetadataFromFile({ bytes: await entry.bytes() });
+          break;
+        case "collectionLog":
+          collection(position.collectionId).log = Buffer.from(await entry.bytes());
           break;
         case "policy":
           collection(position.collectionId).policy = policyFromFile({ bytes: await entry.bytes() });
@@ -197,6 +201,13 @@ export const lambdaHandler = handler(
       if (entry.meta?.backend !== undefined) {
         throw unsupportedBackend(`The archived Collection "${collectionId}" names a backend; this server has none.`);
       }
+      if (entry.log !== undefined) {
+        try {
+          checkHeadState(parseLog(entry.log).entries, null);
+        } catch (err) {
+          throw invalidImport(`The archived history log of "${collectionId}" is not a valid log: ${err.message}`);
+        }
+      }
       for (const [resourceId, r] of entry.resources) {
         if (isReserved("resource", resourceId)) {
           throw invalidImport(`"${resourceId}" is a reserved segment and cannot be a Resource id.`);
@@ -214,6 +225,8 @@ export const lambdaHandler = handler(
       resourcesSkipped: 0,
       policiesCreated: 0,
       policiesSkipped: 0,
+      logsCreated: 0,
+      logsSkipped: 0,
       spaceMetadata: "skipped",
       provenance: { verified: 0, unattested: 0, proofInvalid: 0, contentMismatch: 0, unknownSigner: 0 },
     };
@@ -249,9 +262,26 @@ export const lambdaHandler = handler(
         if (entry.policy) {
           report.policiesSkipped++;
         }
+        if (entry.log !== undefined) {
+          report.logsSkipped++;
+        }
       } else {
         await putIfAbsent(spaceId, KEYS.collectionMeta(collectionId), collectionDocFrom(collectionId, entry.meta));
         report.collectionsCreated++;
+        // The governing history log, declaring the new Collection governed,
+        // when the archive carries one and the metadata holds no
+        // client-written descriptor (a Collection is provisioned in one
+        // form or the other); its lines are checked as a write is checked
+        if (entry.log !== undefined) {
+          if (entry.meta?.encryption === undefined && (await headObject(spaceId, KEYS.collectionLog(collectionId))) === null) {
+            const { lines, entries } = parseLog(entry.log);
+            checkHeadState(entries, null);
+            await writeCollectionLog(spaceId, collectionId, lines, { ifNoneMatch: "*" });
+            report.logsCreated++;
+          } else {
+            report.logsSkipped++;
+          }
+        }
         if (entry.policy) {
           if (await putIfAbsent(spaceId, KEYS.collectionPolicy(collectionId), entry.policy)) {
             report.policiesCreated++;

@@ -143,7 +143,8 @@ export async function invoke({
   const response = await handler(event, {});
   const lower = Object.fromEntries(Object.entries(response.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
   let parsed;
-  if (/json/.test(lower["content-type"] ?? "") && response.body) {
+  // JSON bodies are parsed; JSON Lines (text/jsonl) is not one document
+  if (/application\/([a-z.+-]*\+)?json/.test(lower["content-type"] ?? "") && response.body) {
     parsed = JSON.parse(response.body);
   }
   return {

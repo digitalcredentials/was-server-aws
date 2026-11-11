@@ -9,6 +9,7 @@ import {
   collectBytes,
   spaceMetadataFileName,
   collectionMetadataFileName,
+  collectionLogFileName,
   fileNameFor,
   metaSidecarFileName,
   resourcePolicyFileName,
@@ -24,9 +25,9 @@ import {
 // names and the manifest are the reference implementation's.
 //
 // What this server does not keep is absent from the archive: no tombstones
-// (deletes are permanent here), no chunks, no governing history logs, no
-// revocation records, and no provenance (this instance has no signing
-// identity). Backend registrations and quotas are server state, not Space
+// (deletes are permanent here), no chunks, no revocation records, and no
+// provenance (this instance has no signing identity). A Collection's
+// governing history log travels as its own file beside the metadata. Backend registrations and quotas are server state, not Space
 // data, and are left out as the spec requires.
 //
 // The archive is built in memory and answered as one response body. API
@@ -72,7 +73,14 @@ async function collectionEntry(req, spaceId, collectionId, budget) {
   if (meta === null) {
     return null;
   }
-  const files = [{ name: collectionMetadataFileName(collectionId), bytes: bytesOf(stored(meta.doc)) }];
+  // The stored metadata object: on a governed Collection the derived
+  // members stay out, and the governing log travels as its own file
+  const { encryption: _encryption, revisions: _revisions, ...metadata } = stored(meta.doc);
+  const files = [{ name: collectionMetadataFileName(collectionId), bytes: bytesOf(meta.governed ? metadata : stored(meta.doc)) }];
+  const log = await getObject(spaceId, KEYS.collectionLog(collectionId));
+  if (log !== null) {
+    files.push({ name: collectionLogFileName(collectionId), bytes: log.body });
+  }
   const policy = await getJson(spaceId, KEYS.collectionPolicy(collectionId));
   if (policy) {
     files.push({ name: COLLECTION_POLICY_FILE_NAME, bytes: bytesOf(policy.doc) });
