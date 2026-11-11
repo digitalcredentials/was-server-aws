@@ -1,5 +1,7 @@
 import { securityLoader, createDefaultDidResolver } from "@interop/security-document-loader";
-import { verifyCapabilityInvocation } from "@interop/http-signature-zcap-verify";
+import { verifyCapabilityInvocation, decodeEmbeddedCapability } from "@interop/http-signature-zcap-verify";
+import jsigs from "@interop/jsonld-signatures";
+import { CapabilityDelegation } from "@interop/zcap";
 import * as didKey from "@interop/did-method-key";
 import { Ed25519VerificationKey } from "@interop/ed25519-verification-key";
 import { Ed25519Signature2020 } from "@interop/ed25519-signature";
@@ -7,6 +9,7 @@ import { createVerifyCryptosuite } from "@interop/ed25519-signature/eddsa-jcs-20
 import { DataIntegrityProof } from "@interop/data-integrity-proof";
 import * as webvhDriver from "@interop/did-method-webvh";
 import { isWebvhDid, resolveWebvhDocument, verificationMethodFor } from "was-lib/webvh.mjs";
+import { capabilityControllers, CAPABILITY_REVOKED_ERROR_NAME } from "./chain.mjs";
 
 // Capability-invocation verification. A request is authorized by a zcap
 // invocation signed by `controller`: every urn:zcap:root:{url} resolves to
@@ -20,6 +23,9 @@ import { isWebvhDid, resolveWebvhDocument, verificationMethodFor } from "was-lib
 // capabilityInvocation (or capabilityDelegation, for a delegation's proof),
 // and the method's controller is the did:webvh, which is what the root
 // capability's controller is compared against.
+//
+// After the signatures, a chain inspector (chain.mjs) may still refuse a
+// delegated chain: the revocation store and the client-annex clause.
 
 const didKeyDriver = didKey.driver();
 didKeyDriver.use({
@@ -97,7 +103,7 @@ async function webvhVerifier(keyId) {
   return { verifier: key.verifier(), verificationMethod };
 }
 
-async function getVerifier({ keyId }) {
+export async function getVerifier({ keyId }) {
   if (isWebvhDid(keyId)) {
     return webvhVerifier(keyId);
   }
@@ -106,19 +112,33 @@ async function getVerifier({ keyId }) {
   return { verifier: key.verifier(), verificationMethod: didDocument };
 }
 
-function rootCapabilityLoader(controller) {
+export const ROOT_PREFIX = "urn:zcap:root:";
+
+export const rootCapabilityId = (url) => `${ROOT_PREFIX}${encodeURIComponent(url)}`;
+
+// The target a root capability id names, or undefined for any other id.
+export const rootTargetOf = (id) =>
+  typeof id === "string" && id.startsWith(ROOT_PREFIX) ? decodeURIComponent(id.slice(ROOT_PREFIX.length)) : undefined;
+
+// A document loader whose `urn` handler synthesizes urn:zcap:root:{target}
+// capabilities on demand, controlled by what `controllerFor(target)`
+// answers (one DID, or several: the revocation URL's root is controlled by
+// every party in the chain being revoked). The zcap library only
+// dereferences a root it expects, so `controllerFor` sees expected targets
+// only; it may still throw to refuse one.
+export function rootCapabilityLoader(controllerFor) {
   const loader = baseDocumentLoader.clone();
   loader.setProtocolHandler({
     protocol: "urn",
     handler: {
       get: async ({ id, url }) => {
         const resolvedUrl = url || id;
-        const target = decodeURIComponent(resolvedUrl.split("urn:zcap:root:")[1]);
+        const target = rootTargetOf(resolvedUrl);
         return {
           "@context": "https://w3id.org/zcap/v1",
           id: resolvedUrl,
           invocationTarget: target,
-          controller,
+          controller: controllerFor(target),
         };
       },
     },
@@ -126,22 +146,77 @@ function rootCapabilityLoader(controller) {
   return loader.build();
 }
 
-export const rootCapabilityId = (url) => `urn:zcap:root:${encodeURIComponent(url)}`;
-
 // The proof suites a delegated capability's proof may carry: the zcap
 // library verifies each link of a delegation chain with whichever of these
 // matches the proof's type. Ed25519Signature2020 is what ezcap's default
-// signs; eddsa-jcs-2022 is what @interop/was-client and wallet-core clients
+// signs; eddsa-jcs-2022 is what @interop/pws-client and wallet-core clients
 // sign every delegation with. (The invocation itself is an HTTP signature,
 // verified through `getVerifier`, and carries no suite.)
-const delegationSuites = () => [new Ed25519Signature2020(), new DataIntegrityProof({ cryptosuite: createVerifyCryptosuite() })];
+export const delegationSuites = () => [new Ed25519Signature2020(), new DataIntegrityProof({ cryptosuite: createVerifyCryptosuite() })];
+
+// The zcap library's own wording for a lapsed link.
+const EXPIRED_MESSAGE = "A capability in the delegation chain has expired.";
+
+// The embedded capability of a delegated invocation (the `capability`
+// parameter of the Capability-Invocation header), or undefined for a root
+// invocation, which carries the capability id alone.
+function embeddedCapability(headers) {
+  const header = headers["capability-invocation"] ?? headers["Capability-Invocation"];
+  const encoded = header?.match(/capability="([^"]+)"/)?.[1];
+  if (!encoded) {
+    return undefined;
+  }
+  try {
+    return decodeEmbeddedCapability({ encoded });
+  } catch {
+    return undefined;
+  }
+}
+
+// Whether the request's signer is a controller of the capability it invokes:
+// the holder of the grant, who may be told that the grant was revoked or
+// has expired where anyone else learns nothing.
+export function invokerIsController(headers) {
+  const capability = embeddedCapability(headers);
+  const signer = signerDid(headers.authorization ?? headers.Authorization);
+  return capability !== undefined && signer !== undefined && capabilityControllers(capability).includes(signer);
+}
+
+// The named reason a verification failed, when there is one the invoker
+// may be given: "capability-revoked" or "capability-expired".
+export function denialOf(error, headers) {
+  const seen = new Set();
+  const causes = [error];
+  let named;
+  while (causes.length && named === undefined) {
+    const cause = causes.shift();
+    if (!cause || typeof cause !== "object" || seen.has(cause)) {
+      continue;
+    }
+    seen.add(cause);
+    if (cause.name === CAPABILITY_REVOKED_ERROR_NAME) {
+      named = "capability-revoked";
+    } else if (cause.message === EXPIRED_MESSAGE) {
+      named = "capability-expired";
+    }
+    causes.push(...(Array.isArray(cause.errors) ? cause.errors : []), cause.cause);
+  }
+  return named !== undefined && invokerIsController(headers) ? named : undefined;
+}
 
 // Verifies that the request carries an invocation of one of `urls` (the
 // delivered URL and, when ids were percent-encoded, the re-encoded URL the
-// client signed) authorized by `controller`. Resolves to
-// { controller, delegated } or null, with the reason logged.
-export async function verifyInvocation({ method, host, headers }, { controller, urls, roots = [] }) {
-  const documentLoader = rootCapabilityLoader(controller);
+// client signed). The roots are controlled by `controller`, or by what
+// `controllerFor(target)` answers per root target; `roots` adds container
+// roots a delegation chain may start from, `targets` further targets an
+// attenuated chain may name, and `inspectCapabilityChain` runs over a
+// verified chain. Resolves to { verified: true, controller, delegated } or
+// { verified: false, denial? }, with the reason logged.
+export async function verifyInvocation(
+  { method, host, headers },
+  { controller, controllerFor = () => controller, urls, roots = [], targets = [], inspectCapabilityChain }
+) {
+  const documentLoader = rootCapabilityLoader(controllerFor);
   let error;
   for (const url of urls) {
     try {
@@ -155,13 +230,15 @@ export async function verifyInvocation({ method, host, headers }, { controller, 
         documentLoader,
         expectedHost: host,
         expectedAction: method,
-        expectedTarget: url,
+        expectedTarget: targets.length ? [...targets, url] : url,
         expectedRootCapability: [rootCapabilityId(url), ...roots],
         allowTargetAttenuation: true,
+        inspectCapabilityChain,
       });
       if (result.verified) {
         const capability = result.capability;
         return {
+          verified: true,
           controller: result.controller ?? controller,
           delegated: typeof capability === "object" && capability !== null && "parentCapability" in capability,
         };
@@ -172,7 +249,21 @@ export async function verifyInvocation({ method, host, headers }, { controller, 
     }
   }
   console.error("Invocation rejected:", error?.message ?? error);
-  return null;
+  return { verified: false, denial: denialOf(error, headers) };
+}
+
+// Verifies the delegation chain of a capability on its own (no invocation):
+// its proof under the CapabilityDelegation purpose, over the embedded chain
+// up to one of `expectedRootCapability`, whose roots `controllerFor`
+// controls. Resolves to the jsonld-signatures result ({ verified, error?,
+// results }); throws only for a document the library cannot process.
+export async function verifyDelegationChain({ capability, expectedRootCapability, controllerFor, inspectCapabilityChain, allowTargetAttenuation = true }) {
+  const suite = delegationSuites();
+  return jsigs.verify(capability, {
+    documentLoader: rootCapabilityLoader(controllerFor),
+    suite,
+    purpose: new CapabilityDelegation({ suite, expectedRootCapability, allowTargetAttenuation, inspectCapabilityChain }),
+  });
 }
 
 // The signer's DID from the HTTP signature's keyId: did:key:z6Mk...#z6Mk...

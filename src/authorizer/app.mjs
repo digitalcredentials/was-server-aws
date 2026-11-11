@@ -3,9 +3,12 @@
 // TDZ error otherwise.
 import "@interop/http-client";
 
-import { DynamoDBClient, GetItemCommand } from "@aws-sdk/client-dynamodb";
 import { deriveSpaceId } from "was-lib/webvh.mjs";
 import { verifyInvocation, signerDid, rootCapabilityId } from "./zcap.mjs";
+import { getSpace } from "./registry.mjs";
+import { composeChainInspectors } from "./chain.mjs";
+import { revocationChainInspector } from "./revocations.mjs";
+import { clientAnnexChainInspector } from "./annex.mjs";
 
 // The HTTP API's REQUEST authorizer (payload v2, simple responses): it
 // verifies a signed request's capability invocation and reports the result
@@ -18,6 +21,9 @@ import { verifyInvocation, signerDid, rootCapabilityId } from "./zcap.mjs";
 //   verified         "true" when the invocation verified
 //   controller       the verified signer's DID (the invoker)
 //   delegated        "true" when a delegated capability was invoked
+//   denial           when the invocation did not verify and the invoker
+//                    holds the grant that failed: "capability-revoked" or
+//                    "capability-expired" (the named 404s); else ""
 //   space            "missing" when the URL names a Space the registry
 //                    does not hold; "unregistered" when it does not hold
 //                    it but the id is derived from the signing DID (an
@@ -30,9 +36,10 @@ import { verifyInvocation, signerDid, rootCapabilityId } from "./zcap.mjs";
 // unregistered Space whose id the signer derived from its own DID, against
 // the DID that signed it, which the handler then compares to the stated
 // controller. The controller may be a did:key or a did:webvh (zcap.mjs).
-
-const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
+//
+// A delegated chain also passes the chain inspectors: the Space's
+// revocation records (revocations.mjs) and the client-annex clause
+// (annex.mjs), which reads the operation's target and method.
 
 function header(headers, name) {
   const match = Object.keys(headers).find((key) => key.toLowerCase() === name);
@@ -47,19 +54,22 @@ function decodeSegment(segment) {
   }
 }
 
-async function getSpace(spaceUrl) {
-  const { Item } = await dynamo.send(
-    new GetItemCommand({ TableName: SPACES_TABLE, Key: { spaceURL: { S: spaceUrl } } })
-  );
-  if (!Item) {
-    return null;
+// The inspectors for one operation: revocations where a registered Space
+// scopes them, the clause everywhere.
+const inspectorFor = ({ base, spaceId, target, method }) =>
+  composeChainInspectors([
+    ...(spaceId !== undefined ? [revocationChainInspector(spaceId)] : []),
+    clientAnnexChainInspector({ serverUrl: base, invocation: { target, action: method } }),
+  ]);
+
+function record(context, result) {
+  if (result.verified) {
+    context.verified = "true";
+    context.controller = result.controller;
+    context.delegated = String(result.delegated);
+  } else if (result.denial) {
+    context.denial = result.denial;
   }
-  const type = Item.type?.L
-    ? Item.type.L.map((entry) => entry.S)
-    : Item.type?.S === "batch"
-      ? ["Space", "BatchSpace"]
-      : ["Space"];
-  return { controller: Item.did?.S?.split("#")[0], type };
 }
 
 export const lambdaHandler = async (event) => {
@@ -78,6 +88,8 @@ export const lambdaHandler = async (event) => {
   const ids = trailingSlash ? segments.slice(0, -1) : segments;
   const encodedPath = "/" + ids.map(encodeURIComponent).join("/") + (trailingSlash ? "/" : "");
   const urls = [...new Set([`${base}${rawPath}${search}`, `${base}${encodedPath}${search}`])];
+  // The operation's canonical target, for the clause's invocation-time bound
+  const target = `${base}${encodedPath}`;
 
   const authorization = header(headers, "authorization");
   const context = {
@@ -85,6 +97,7 @@ export const lambdaHandler = async (event) => {
     verified: "false",
     controller: "",
     delegated: "false",
+    denial: "",
     space: "",
     spaceController: "",
     spaceType: "",
@@ -95,12 +108,8 @@ export const lambdaHandler = async (event) => {
   if (ids[0] === "spaces") {
     const signer = authorization ? signerDid(authorization) : undefined;
     if (signer) {
-      const result = await verifyInvocation(request, { controller: signer, urls });
-      if (result) {
-        context.verified = "true";
-        context.controller = result.controller;
-        context.delegated = String(result.delegated);
-      }
+      const inspectCapabilityChain = inspectorFor({ base, target, method });
+      record(context, await verifyInvocation(request, { controller: signer, urls, inspectCapabilityChain }));
     }
   } else if (ids[0] === "space" && ids[1]) {
     const space = await getSpace(`${base}/space/${ids[1]}`);
@@ -118,12 +127,8 @@ export const lambdaHandler = async (event) => {
         context.space = "unregistered";
         context.spaceController = signer;
         context.spaceType = JSON.stringify(["Space"]);
-        const result = await verifyInvocation(request, { controller: signer, urls });
-        if (result) {
-          context.verified = "true";
-          context.controller = result.controller;
-          context.delegated = String(result.delegated);
-        }
+        const inspectCapabilityChain = inspectorFor({ base, target, method });
+        record(context, await verifyInvocation(request, { controller: signer, urls, inspectCapabilityChain }));
       } else {
         context.space = "missing";
       }
@@ -136,12 +141,8 @@ export const lambdaHandler = async (event) => {
         if (ids[2] !== undefined) {
           roots.push(rootCapabilityId(`${spaceUrl}${encodeURIComponent(ids[2])}/`));
         }
-        const result = await verifyInvocation(request, { controller: space.controller, urls, roots });
-        if (result) {
-          context.verified = "true";
-          context.controller = result.controller;
-          context.delegated = String(result.delegated);
-        }
+        const inspectCapabilityChain = inspectorFor({ base, spaceId: ids[1], target, method });
+        record(context, await verifyInvocation(request, { controller: space.controller, urls, roots, inspectCapabilityChain }));
       }
     }
   }

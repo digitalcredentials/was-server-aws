@@ -27,6 +27,9 @@ export const routes = [
   { methods: ["GET", "HEAD"], path: `${S}/policy`, fn: "space/policy-get" },
   { methods: ["PUT"], path: `${S}/policy`, fn: "space/policy-put" },
   { methods: ["DELETE"], path: `${S}/policy`, fn: "space/policy-delete" },
+  // The revocation endpoint verifies its own invocation (the authorizer is
+  // off for the route) and is built from the authorizer's directory
+  { methods: ["POST"], path: `${S}/zcaps/revocations/{revocation_id}`, fn: "authorizer/revoke", auth: false },
 
   { methods: ["GET", "HEAD"], path: R, fn: "resource/get" },
   { methods: ["POST"], path: R, fn: "resource/create" },

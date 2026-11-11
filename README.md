@@ -29,6 +29,7 @@ to the canonical one.
 | GET / PUT / DELETE | `/space/{s}/policy` | `SpacePolicy{Get,Put,Delete}Fn` | the Space's access-control policy |
 | POST | `/space/{s}/export` | `SpaceExportFn` | the Space as a Space archive (tar) |
 | POST | `/space/{s}/import` | `SpaceImportFn` | merge a Space archive into the Space |
+| POST | `/space/{s}/zcaps/revocations/{id}` | `SpaceRevocationPostFn` | revoke a delegated capability rooted in the Space (the body is the capability) |
 | GET | `/space/{s}/{c}/` | `ResourceGetFn` | list the Collection's Resources |
 | POST | `/space/{s}/{c}/` | `ResourceCreateFn` | create a Resource with a server-assigned id |
 | DELETE | `/space/{s}/{c}/` | `ResourceDeleteFn` | delete the Collection and everything in it |
@@ -43,7 +44,7 @@ to the canonical one.
 | DELETE | `/space/{s}/{c}/{r}` | `ResourceDeleteFn` | delete it (permanently) |
 | GET / PUT | `/space/{s}/{c}/{r}/meta` | `ResourceMeta{Get,Put}Fn` | Resource Metadata (derived fields + `custom`) |
 | GET / PUT / DELETE | `/space/{s}/{c}/{r}/policy` | `ResourcePolicy{Get,Put,Delete}Fn` | the Resource's policy |
-| anything else | | `DefaultFn` | `308` for the bare Space URL, `501` for optional sections not implemented (`linkset`, `quotas`, `backends`, `replicas`, `chunks`, `zcaps`), `405` for an undefined method at a reserved endpoint, else `404` |
+| anything else | | `DefaultFn` | `308` for the bare Space URL, `501` for optional sections not implemented (`linkset`, `quotas`, `backends`, `replicas`, `chunks`), `405` for an undefined method at a reserved endpoint, else `404` |
 
 **Trailing slashes.** The gateway matches `/space/{s}/` to the
 `/space/{space_id}/{collection_id}` route with an empty `collection_id`,
@@ -58,10 +59,13 @@ has that one branch and nothing else.
 Every response carries `Link: <{base}/service>; rel="service"`. The document
 at `/service` (and, for clients that follow the link from the root, at `/`)
 lists the one specification version served (`0.5`), the Spaces Repository
-URL, and the feature tokens. A v0.5 client reads it before its first signed
-request and refuses a server without it; a client built on a base server
-URL (pws-client 0.105+, FreeWallet) reads `{base}/service` directly, which is
-why the description lives there.
+URL, and the feature tokens, with entries for the authorization profile, the
+Encrypted Collections profile and the client-annex clause (`version` alone:
+a conformance claim a wallet checks at signup, see
+[The client-annex clause](#the-client-annex-clause)). A v0.5 client reads it
+before its first signed request and refuses a server without it; a client
+built on a base server URL (pws-client 0.105+, FreeWallet) reads
+`{base}/service` directly, which is why the description lives there.
 
 ### Spaces Repository
 
@@ -280,6 +284,79 @@ Two operations exist for a wallet to move an account onto a `did:webvh`
   `store.mjs` maps it to `dcc-was-` plus 40 hex characters of its SHA-256;
   server-assigned ids are their own bucket names.
 
+### Revoking a capability
+
+`POST /space/{s}/zcaps/revocations/{id}` revokes a delegated capability
+rooted in the Space: the body is the capability itself, proof and chain
+included, and `{id}` is its id. This is the reference stack's Space-scoped
+revocation endpoint (the authorization profile has not specified one yet),
+as `@interop/pws-client`'s `revoke()` submits it. The record is one object
+per revoked capability under `revocations/` in the Space's bucket, keyed by
+the digest of its delegator and its id, kept until a day after the
+capability's own `expires` and deleted with the Space.
+
+Who may submit it is the dual-root rule. The invocation may root in the
+Space, whose controller may revoke anything delegated from it, or in the
+revocation URL itself, whose root capability the function synthesizes as
+controlled by every controller in the submitted capability's chain (the
+Space controller included), so a delegee revokes its own grant without
+holding a separate capability. The chain in the body is verified first,
+structurally and by its delegation proofs, to learn those controllers; the
+invocation is then verified against them; only after that is a refusal of
+the body reported (`400 invalid-request-body`: a root capability, an id
+other than the URL's, a chain that does not verify or is rooted outside the
+Space), so a submitter outside the chain learns nothing but the masked
+`404`. A capability already revoked, or whose chain holds a revoked link, is
+`400 capability-already-revoked`; two submissions that race are `409`.
+Success is `204`.
+
+From then on every invocation that embeds a delegation chain is checked
+against the records by the authorizer's chain inspector (`src/authorizer/revocations.mjs`):
+a chain holding a revoked capability at any depth no longer verifies. The
+holder of the invoked capability is answered `404 capability-revoked` (and
+a chain with an expired link `404 capability-expired`), the named problems
+pws-client reports as such; anyone else is answered the plain `404`, as the
+reference server does.
+
+### The client-annex clause
+
+The service description claims `https://w3id.org/pws/client-annex` at
+version `0.1`, which a wallet built on wallet-core checks before it signs
+an account up on a server: the claim that the server enforces the reference
+server's bound on what a *ladder* verification method may delegate
+(`src/authorizer/annex.mjs`, a port of web-spaces-server's
+`lib/clientAnnexClause.ts` and `docs/client-annex-clause.md`).
+
+A ladder VM is the credential-derived method a wallet publishes on its
+`did:webvh` account document under `capabilityDelegation` but not
+`capabilityInvocation`: it signs delegations and never invokes. A
+delegation it signs is admitted in seven shapes only -- the Space items
+subtree to the annex DID the account document's `DelegatedClients` service
+entry names, with actions from the closed PWS verb vocabulary (the
+generation delegation); a `PUT`-only grant of the account's own history log
+(the bridge) or a `GET`/`PUT`/`POST` grant of a Space typed
+`AuxiliarySpace` + `DelegatedClientsSpace`; a target-exact `DELETE`-only
+grant of a Space; a target-exact `GET`-only grant of a Space Metadata object
+or of one Resource; a target-exact `POST`-only grant over a management
+capability the Space's controller delegated to the account; a `GET`/`HEAD`
+pull of the account or annex Space by a replica server the annex document
+points at; and a maintenance grant on a Space's replicas route, which holds
+on a replica server only and so never here. Two invocation-time bounds
+follow: a chain carrying a ladder-signed link never performs
+`PUT /space/{s}/meta`, and performs `DELETE /space/{s}/` only when every
+ladder-signed link is itself that target-exact `DELETE`-only grant; a chain
+carrying a link signed by a *transient annex VM* (a per-visit method under
+the two capability relationships and nothing else) never deletes a Space
+either. Only DIDs whose log this server hosts are judged; a delegation
+signed by any other key passes untouched, as does a chain with no
+`did:webvh` link at all. A refusal is the masked `404`.
+
+The clause is applied by the authorizer on every verification and by the
+revocation endpoint on its own (without the invocation-time bounds, which
+have no operation to bound there). The container rule keeps Delete Space
+and Update Space Metadata root-only regardless, so the bounds are defense
+in depth here.
+
 ### Status codes, validators, errors
 
 - Create: `201` with `Location` and `ETag`. Update: `204` (content) or `200`
@@ -327,19 +404,22 @@ functions, because a gateway denial is always a `403` and the spec's
 answers are different.
 
 - **The authorizer** ([src/authorizer/](src/authorizer/), bundled with the
-  `@interop` verification stack) runs on every route except `/` and
-  `$default`. For a Space URL it reads the Space's controller DID from the
-  registry row for `{base}/space/{s}` and verifies the invocation against it
-  (every `urn:zcap:root:...` resolves to a root capability controlled by
-  that DID; a delegation chain may start from the invoked URL, the
-  Collection or the Space container, and each delegation's proof may be
-  `Ed25519Signature2020` or `eddsa-jcs-2022`, the suite `@interop/was-client`
-  and wallet-core clients sign with). For `/spaces/` it verifies against the
-  DID that signed. The URL is checked as delivered and, when ids were
-  percent-encoded, re-encoded — API Gateway hands the path decoded. It
-  **never denies**: it answers `isAuthorized: true` with the result in the
-  context (`signed`, `verified`, `controller`, `delegated`, `spaceController`,
-  `spaceType`, or `space=missing`).
+  `@interop` verification stack) runs on every route except `/`, `$default`
+  and the revocation endpoint (which verifies its own invocation, see
+  [Revoking a capability](#revoking-a-capability)). For a Space URL it reads
+  the Space's controller DID from the registry row for `{base}/space/{s}`
+  and verifies the invocation against it (every `urn:zcap:root:...`
+  resolves to a root capability controlled by that DID; a delegation chain
+  may start from the invoked URL, the Collection or the Space container, and
+  each delegation's proof may be `Ed25519Signature2020` or `eddsa-jcs-2022`,
+  the suite `@interop/was-client` and wallet-core clients sign with). For
+  `/spaces/` it verifies against the DID that signed. The URL is checked as
+  delivered and, when ids were percent-encoded, re-encoded — API Gateway
+  hands the path decoded. A verified delegation chain then passes the chain
+  inspectors: the Space's revocation records and the client-annex clause.
+  It **never denies**: it answers `isAuthorized: true` with the result in
+  the context (`signed`, `verified`, `controller`, `delegated`, `denial`,
+  `spaceController`, `spaceType`, or `space=missing`).
 - **Each function** turns that context into the spec's answer through the
   shared `authorize()` ([layers/was-lib/.../auth.mjs](layers/was-lib/nodejs/node_modules/was-lib/auth.mjs)):
   a verified invocation proceeds; the container rule (`DELETE /space/{s}/`,
@@ -350,8 +430,9 @@ answers are different.
   signature to it); an unsigned `GET`/`HEAD` is allowed where a
   `PublicCanRead` policy covers the target (the Resource's own policy, else
   its Collection's, else the Space's; policies themselves are never public);
-  anything else is `404`, except a listing (`200`, no items) and an unsigned
-  write (`401 missing-authorization`).
+  anything else is `404`, except a listing (`200`, no items), an unsigned
+  write (`401 missing-authorization`), and the holder of a revoked or
+  expired grant (`404 capability-revoked` / `capability-expired`).
 
 ### Permissions
 
@@ -388,6 +469,8 @@ s3://{space_id}/
 │   ├── space.json
 │   ├── {collection_id}.json
 │   └── {collection_id}/{resource_id}.json
+├── revocations/
+│   └── {digest}.json             a revoked delegated capability (digest of delegator + id)
 └── collections/
     └── {collection_id}/
         └── {resource_id}         Resource content
@@ -418,7 +501,9 @@ layers/was-lib/nodejs/node_modules/was-lib/   the shared layer (plain ESM, no de
                      Everything a single endpoint does -- the registry row writes,
                      bucket creation and deletion, coupons, the annotation write --
                      is in that endpoint's own file.
-src/authorizer/      the gateway authorizer (verification only; bundled)
+src/authorizer/      the verification stack (bundled): app.mjs the gateway authorizer,
+│                    zcap.mjs verification, chain.mjs + revocations.mjs + annex.mjs the
+│                    chain inspectors, revoke.mjs the revocation endpoint
 src/endpoints/       one directory per endpoint, grouped by what the route addresses;
 │                    each app.mjs is that endpoint's operation
 ├── service/get
@@ -515,6 +600,14 @@ response deliberately says only `404`.
 - **Resource listings `HEAD` each object** for its content type and stamps.
 - **Export is bounded by the gateway's response size** (4 MB of archive);
   no provenance is signed or verified.
+- **Revocation records are not part of the Space archive**: an export
+  carries no `revocations/` entries and an import installs none, where the
+  reference server archives them under `.revocations/`.
+- **The container rule has no exceptions**: the reference server lets a
+  delegated chain whose tail is a target-exact `DELETE`-only grant delete a
+  Space, and a Space-subtree grant write a Collection's history log; here
+  `DELETE /space/{s}/` stays root-only, and `PUT .../meta/log` takes any
+  chain that covers the URL.
 - Optional profiles not implemented: chunked resources, quotas, backends,
   linksets, the `blinded-index` query profile.
 

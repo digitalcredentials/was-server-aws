@@ -1,7 +1,7 @@
 {
   "name": "was-zcap-authorizer",
   "version": "1.0.0",
-  "description": "API Gateway REQUEST authorizer that verifies zCap invocations and reports the result in the request context",
+  "description": "API Gateway REQUEST authorizer that verifies zCap invocations and reports the result in the request context, and the revocation endpoint beside it",
   "type": "module",
   "engines": {
     "node": ">=24.0"
@@ -14,7 +14,9 @@
     "@interop/ed25519-verification-key": "^8.0.4",
     "@interop/http-client": "^1.0.5",
     "@interop/http-signature-zcap-verify": "^12.2.1",
-    "@interop/security-document-loader": "^10.0.4"
+    "@interop/jsonld-signatures": "^11.8.5",
+    "@interop/security-document-loader": "^10.0.4",
+    "@interop/zcap": "^11.1.0"
   },
   "devDependencies": {
     "@aws-sdk/client-dynamodb": "^3.1127.0"
