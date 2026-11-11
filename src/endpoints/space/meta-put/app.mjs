@@ -8,6 +8,7 @@ import { s3, bucketOf } from "was-lib/store.mjs";
 import { isSelfProvisionedSpaceId, isReservedSpaceId } from "was-lib/ids.mjs";
 import { controllerMismatch, invalidRequestBody, notFound, quotaExceeded, reservedId } from "was-lib/problems.mjs";
 import { deriveSpaceId, invokerKeyListed, isWebvhDid, resolveWebvhDocument } from "was-lib/webvh.mjs";
+import { releaseCouponlessSlot, reserveCouponlessSlot } from "was-lib/quota.mjs";
 
 // PUT /space/{s}/meta -- a full replacement of the writable members, under
 // If-Match / If-None-Match. `type` is write-once, and the name is mirrored
@@ -24,7 +25,9 @@ import { deriveSpaceId, invokerKeyListed, isWebvhDid, resolveWebvhDocument } fro
 //     With open provisioning (`OPEN_PROVISIONING=true`) a did:key may also
 //     create any Space by id with `If-None-Match: *` and itself as
 //     controller, within a per-controller cap: the reference client's
-//     create-by-id, which a FreeWallet account needs.
+//     create-by-id, which a FreeWallet account needs. Either way the
+//     creation takes a slot under the global cap on coupon-less Spaces
+//     (was-lib/quota.mjs), since any key holder can reach these paths.
 //   - Promoting the controller. A body naming a did:webvh as controller,
 //     where the Space's controller is a did:key, is accepted when the
 //     did:webvh's current document lists the invoking key under
@@ -63,7 +66,7 @@ async function setController(registryUrl, controller) {
   );
 }
 
-async function registerSpace({ url, controller, type, name, createdAt }) {
+async function registerSpace({ url, controller, type, name, createdAt, provisioning }) {
   await dynamo.send(
     new PutItemCommand({
       TableName: SPACES_TABLE,
@@ -73,6 +76,7 @@ async function registerSpace({ url, controller, type, name, createdAt }) {
         type: { L: type.map((entry) => ({ S: entry })) },
         ...(name !== undefined && { name: { S: name } }),
         CreatedAt: { S: createdAt },
+        provisioning: { S: provisioning },
       },
     })
   );
@@ -155,12 +159,27 @@ async function provisionSpaceById(req, { spaceId }, body) {
     createdAt: stamp,
     updatedAt: stamp,
   };
-  await s3.send(new CreateBucketCommand({ Bucket: bucketOf(spaceId) }));
-  // The bucket's object events feed the Collections' `changes` feeds
-  await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: bucketOf(spaceId), NotificationConfiguration: { EventBridgeConfiguration: {} } }));
-  const written = await writeSpaceMeta(req, spaceId, doc, preconditions(req));
-  await registerSpace({ url: `${SPACE_URL_BASE}/${spaceId}`, controller, type, name: doc.name, createdAt: stamp });
-  return json(req, 201, written.doc, { ...NO_STORE, ETag: written.etag });
+  // No coupon was spent: the Space takes a slot under the global cap,
+  // given back if the creation fails
+  await reserveCouponlessSlot();
+  try {
+    await s3.send(new CreateBucketCommand({ Bucket: bucketOf(spaceId) }));
+    // The bucket's object events feed the Collections' `changes` feeds
+    await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: bucketOf(spaceId), NotificationConfiguration: { EventBridgeConfiguration: {} } }));
+    const written = await writeSpaceMeta(req, spaceId, doc, preconditions(req));
+    await registerSpace({
+      url: `${SPACE_URL_BASE}/${spaceId}`,
+      controller,
+      type,
+      name: doc.name,
+      createdAt: stamp,
+      provisioning: derived ? "derived" : "open",
+    });
+    return json(req, 201, written.doc, { ...NO_STORE, ETag: written.etag });
+  } catch (err) {
+    await releaseCouponlessSlot().catch(() => {});
+    throw err;
+  }
 }
 
 // The controller the written document carries: unchanged, or promoted.

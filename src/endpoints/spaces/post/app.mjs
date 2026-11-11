@@ -90,6 +90,8 @@ async function registerSpace({ url, controller, type, name, createdAt }) {
           type: { L: type.map((entry) => ({ S: entry })) },
           ...(name !== undefined && { name: { S: name } }),
           CreatedAt: { S: createdAt },
+          // A coupon was spent: outside the cap on coupon-less Spaces
+          provisioning: { S: "coupon" },
         },
         ConditionExpression: "attribute_not_exists(spaceURL)",
       })

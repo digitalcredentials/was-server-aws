@@ -44,6 +44,30 @@ Parameters:
     Type: String
     Description: How many Spaces one did:key may create by id under open provisioning.
     Default: "20"
+  # The cap on Spaces (and so S3 buckets) created without a coupon: unlock
+  # Spaces, whose derived id any key holder can claim, and Spaces created
+  # by id under open provisioning. Spaces created with a coupon never
+  # count. "0" closes both paths. See README, "The cap on Spaces created
+  # without a coupon".
+  MaxCouponlessSpaces:
+    Type: String
+    Description: How many Spaces may exist that were created without a coupon; "0" closes those paths.
+    Default: "200"
+  CouponlessAlarmThreshold:
+    Type: String
+    Description: The CouponlessSpaces count at or above which the stack's alarm fires.
+    Default: "160"
+  SpaceBucketsAlarmThreshold:
+    Type: String
+    Description: The number of dcc-was-* buckets at or above which the stack's alarm fires.
+    Default: "300"
+  AlertEmail:
+    Type: String
+    Description: An address subscribed to the quota alarms' topic (empty for none; the subscription must be confirmed by email).
+    Default: ""
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
 
 Globals:
   Function:
@@ -64,6 +88,7 @@ Globals:
         API_HOST: !Ref ApiDomain
         OPEN_PROVISIONING: !Ref OpenProvisioning
         MAX_SPACES_PER_CONTROLLER: !Ref MaxSpacesPerController
+        MAX_COUPONLESS_SPACES: !Ref MaxCouponlessSpaces
 
 Resources:
   # Space-creation coupons, owned by this stack: one row per coupon string.
@@ -219,6 +244,13 @@ Resources:
         - DynamoDBReadPolicy:
             TableName: !Ref WasSpacesTable
         - Statement:
+            # A whole-registry sweep reconciles the coupon-less counter and
+            # backfills `provisioning` on older rows
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt WasSpacesTable.Arn
             - Effect: Allow
               Action:
                 - s3:ListBucket
@@ -230,6 +262,82 @@ Resources:
             - Effect: Allow
               Action: sqs:SendMessage
               Resource: !GetAtt FeedQueue.Arn
+
+  # ---------------------------------------------------------------------------
+  # The cap on Spaces created without a coupon (README, "The cap on Spaces
+  # created without a coupon"): the counter lives in the registry table;
+  # this function publishes it and the bucket count as metrics every hour,
+  # and the two alarms below notify the topic.
+  # ---------------------------------------------------------------------------
+  QuotaWatchFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/quota/watch
+      Handler: app.lambdaHandler
+      Timeout: 60
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WasSpacesTable
+        - Statement:
+            - Effect: Allow
+              Action: s3:ListAllMyBuckets
+              Resource: "*"
+            - Effect: Allow
+              Action: cloudwatch:PutMetricData
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: WasServer
+      Events:
+        Hourly:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+
+  QuotaTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: was-server-quota-alerts
+
+  QuotaEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref QuotaTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  CouponlessSpacesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: was-server-couponless-spaces
+      AlarmDescription: Spaces created without a coupon are approaching the cap (MaxCouponlessSpaces).
+      Namespace: WasServer
+      MetricName: CouponlessSpaces
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: !Ref CouponlessAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref QuotaTopic
+
+  SpaceBucketsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: was-server-space-buckets
+      AlarmDescription: The number of dcc-was-* buckets is high.
+      Namespace: WasServer
+      MetricName: SpaceBuckets
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: !Ref SpaceBucketsAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref QuotaTopic
 
   WasSpacesTable:
     Type: AWS::DynamoDB::Table
@@ -712,9 +820,13 @@ Resources:
       Timeout: 60
       Policies:
         - Statement:
+            # GetItem reads how the Space was provisioned; UpdateItem gives a
+            # coupon-less Space's slot back to the cap's counter
             - Effect: Allow
               Action:
+                - dynamodb:GetItem
                 - dynamodb:DeleteItem
+                - dynamodb:UpdateItem
               Resource: !GetAtt WasSpacesTable.Arn
             - Effect: Allow
               Action:

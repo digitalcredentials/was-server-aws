@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { S3Client, PutBucketNotificationConfigurationCommand } from "@aws-sdk/client-s3";
 import { SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
-import { DynamoDBClient, ScanCommand } from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient, ScanCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { bucketOf, headObject, listAllKeys } from "was-lib/store.mjs";
 import { classifyKey, keyOfRecord, allFeedRows } from "was-lib/feed.mjs";
+import { isCounterRow, isCouponlessRow, maxCouponlessSpaces, provisioningOf, setCouponlessCount } from "was-lib/quota.mjs";
 
 // The feed sweep: compares a bucket's objects with its feed rows and
 // queues a synthetic event for every record the feed has wrong or missing
@@ -20,22 +21,48 @@ const s3 = new S3Client({});
 const sqs = new SQSClient({});
 const dynamo = new DynamoDBClient({});
 
-async function registeredBuckets() {
-  const buckets = [];
+// Every registry row (the coupon-less counter's sentinel row excluded).
+async function registeredSpaces() {
+  const rows = [];
   let cursor;
   do {
     const out = await dynamo.send(
-      new ScanCommand({ TableName: SPACES_TABLE, ProjectionExpression: "spaceURL", ...(cursor && { ExclusiveStartKey: cursor }) })
+      new ScanCommand({ TableName: SPACES_TABLE, ProjectionExpression: "spaceURL, provisioning", ...(cursor && { ExclusiveStartKey: cursor }) })
     );
     for (const row of out.Items ?? []) {
-      const spaceId = row.spaceURL.S.split("/space/")[1];
-      if (spaceId) {
-        buckets.push(bucketOf(spaceId));
+      if (!isCounterRow(row) && row.spaceURL?.S?.includes("/space/")) {
+        rows.push(row);
       }
     }
     cursor = out.LastEvaluatedKey;
   } while (cursor);
-  return buckets;
+  return rows;
+}
+
+const bucketsOf = (rows) => rows.map((row) => bucketOf(row.spaceURL.S.split("/space/")[1]));
+
+// Recounts the Spaces created without a coupon from the registry rows,
+// sets the counter to the count, and records `provisioning` on rows from
+// before the attribute existed (read by their id form until then).
+async function reconcileCouponless(rows) {
+  let count = 0;
+  for (const row of rows) {
+    if (isCouponlessRow(row)) {
+      count++;
+    }
+    if (row.provisioning === undefined) {
+      await dynamo.send(
+        new UpdateItemCommand({
+          TableName: SPACES_TABLE,
+          Key: { spaceURL: row.spaceURL },
+          UpdateExpression: "SET provisioning = :kind",
+          ExpressionAttributeValues: { ":kind": { S: provisioningOf(row) } },
+        })
+      );
+    }
+  }
+  await setCouponlessCount(count);
+  return { count, max: maxCouponlessSpaces() };
 }
 
 export async function ensureBucketEvents(bucket) {
@@ -117,8 +144,16 @@ export async function sweepBucket(bucket) {
 }
 
 export const lambdaHandler = async (input = {}) => {
-  const buckets = Array.isArray(input.buckets) && input.buckets.length ? input.buckets : await registeredBuckets();
   const report = {};
+  let buckets;
+  if (Array.isArray(input.buckets) && input.buckets.length) {
+    buckets = input.buckets;
+  } else {
+    // A whole-registry sweep also reconciles the coupon-less counter
+    const rows = await registeredSpaces();
+    buckets = bucketsOf(rows);
+    report.couponlessSpaces = await reconcileCouponless(rows);
+  }
   for (const bucket of buckets) {
     try {
       await ensureBucketEvents(bucket);
