@@ -121,6 +121,36 @@ try {
   const noteRead = await note.getWithEtag();
   check("getWithEtag() returns the content and its validator", noteRead?.data?.body === "plain" && Boolean(noteRead.etag));
   await expectThrow("put() pinned to a stale etag is a 412", () => note.put({ body: "x" }, { ifMatch: '"stale"' }), "PreconditionFailedError");
+
+  // --- a delegated grant, then its revocation --------------------------------
+  const delegateKey = await Ed25519VerificationKey.generate({ seed: createHash("sha256").update(`${SEED}/delegate`).digest() });
+  delegateKey.controller = `did:key:${delegateKey.fingerprint()}`;
+  delegateKey.id = `${delegateKey.controller}#${delegateKey.fingerprint()}`;
+  const delegateClient = new ZcapClient({ SuiteClass: EddsaJcs2022, invocationSigner: delegateKey.signer(), delegationSigner: delegateKey.signer() });
+  const noteUrl = `${WAS}/space/${spaceId}/notes/note.json`;
+  const grant = await zcapClient.delegate({
+    capability: `urn:zcap:root:${encodeURIComponent(`${WAS}/space/${spaceId}/`)}`,
+    controller: delegateKey.controller,
+    invocationTarget: `${WAS}/space/${spaceId}/`,
+    allowedActions: ["GET"],
+    expires: new Date(Date.now() + 3600 * 1000),
+  });
+  // The status and problem type of a refused request (http-client throws)
+  const outcomeOf = (promise) =>
+    promise.then(
+      (res) => ({ status: res.status }),
+      (err) => ({ status: err.status ?? err.response?.status, type: err.data?.type })
+    );
+  const delegatedRead = await delegateClient.request({ url: noteUrl, method: "GET", action: "GET", capability: grant });
+  check("a delegated GET reads the resource", delegatedRead.status === 200 && delegatedRead.data?.body === "plain", delegatedRead.status);
+  const revocationUrl = `${WAS}/space/${spaceId}/zcaps/revocations/${encodeURIComponent(grant.id)}`;
+  const revoked = await outcomeOf(zcapClient.request({ url: revocationUrl, method: "POST", action: "POST", json: grant }));
+  check("POST .../zcaps/revocations/{id} by the controller answers 204", revoked.status === 204, revoked.status);
+  const afterRevocation = await outcomeOf(delegateClient.request({ url: noteUrl, method: "GET", action: "GET", capability: grant }));
+  check("the revoked grant no longer reads, and its holder is told so", afterRevocation.status === 404 && afterRevocation.type === "https://w3id.org/pws#capability-revoked", `${afterRevocation.status} ${afterRevocation.type}`);
+  const again = await outcomeOf(zcapClient.request({ url: revocationUrl, method: "POST", action: "POST", json: grant }));
+  check("revoking it again is a 400 capability-already-revoked", again.status === 400 && again.type === "https://w3id.org/pws#capability-already-revoked", `${again.status} ${again.type}`);
+
   const collections = await space.collections();
   check("space.collections() lists both collections", ["notes", "vault"].every((id) => collections?.items.some((item) => item.id === id)));
 
