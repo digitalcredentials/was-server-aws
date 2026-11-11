@@ -301,7 +301,10 @@ Resources:
   # read policies/* for the PublicCanRead cascade.
   # ---------------------------------------------------------------------------
 
-  # GET / -- the service description. No authorization, no permissions.
+  # GET /service and GET / -- the service description. No authorization, no
+  # permissions. /service is where a client built on a base server URL reads
+  # it (pws-client's server layout); / keeps serving it for clients that
+  # follow the Link header from the root.
   ServiceGetFn:
     Type: AWS::Serverless::Function
     Properties:
@@ -321,6 +324,22 @@ Resources:
           Properties:
             ApiId: !Ref WASHttpApi
             Path: /
+            Method: head
+            Auth:
+              Authorizer: NONE
+        GetService:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /service
+            Method: get
+            Auth:
+              Authorizer: NONE
+        HeadService:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /service
             Method: head
             Auth:
               Authorizer: NONE
