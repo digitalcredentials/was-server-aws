@@ -1,5 +1,5 @@
 import { DynamoDBClient, PutItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
-import { CreateBucketCommand } from "@aws-sdk/client-s3";
+import { CreateBucketCommand, PutBucketNotificationConfigurationCommand } from "@aws-sdk/client-s3";
 import * as webvhDriver from "@interop/did-method-webvh";
 import { handler } from "was-lib/handler.mjs";
 import { json, parseJsonBody, preconditions, NO_STORE } from "was-lib/http.mjs";
@@ -112,6 +112,8 @@ async function provisionUnlockSpace(req, { spaceId }, body) {
     updatedAt: stamp,
   };
   await s3.send(new CreateBucketCommand({ Bucket: bucketOf(spaceId) }));
+  // The bucket's object events feed the Collections' `changes` feeds
+  await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: bucketOf(spaceId), NotificationConfiguration: { EventBridgeConfiguration: {} } }));
   const written = await writeSpaceMeta(req, spaceId, doc, preconditions(req));
   await registerSpace({ url: `${SPACE_URL_BASE}/${spaceId}`, controller, type, name: doc.name, createdAt: stamp });
   return json(req, 201, written.doc, { ...NO_STORE, ETag: written.etag });

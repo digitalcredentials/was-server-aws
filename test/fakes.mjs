@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 const rootRequire = createRequire(new URL("../package.json", import.meta.url));
 const s3 = rootRequire("@aws-sdk/client-s3");
 const ddb = rootRequire("@aws-sdk/client-dynamodb");
+const sqs = rootRequire("@aws-sdk/client-sqs");
 // The authorizer carries its own copy of the DynamoDB client.
 const authorizerRequire = createRequire(new URL("../src/authorizer/package.json", import.meta.url));
 const authorizerDdb = authorizerRequire("@aws-sdk/client-dynamodb");
@@ -44,6 +45,9 @@ export class FakeS3 {
   async send(command) {
     const input = command.input;
     switch (command.constructor.name) {
+      case "PutBucketNotificationConfigurationCommand":
+        this.bucket(input.Bucket);
+        return {};
       case "CreateBucketCommand":
         this.buckets.set(input.Bucket, new Map());
         return {};
@@ -169,8 +173,93 @@ export class FakeS3 {
   }
 }
 
+export class FakeSqs {
+  messages = [];
+
+  async send(command) {
+    if (command.constructor.name === "SendMessageBatchCommand") {
+      this.messages.push(...command.input.Entries.map((entry) => ({ ...entry, body: JSON.parse(entry.MessageBody) })));
+      return { Successful: command.input.Entries.map((entry) => ({ Id: entry.Id })), Failed: [] };
+    }
+    throw new Error(`FakeSqs: unsupported command ${command.constructor.name}`);
+  }
+}
+
 export class FakeDynamo {
-  tables = { "was-spaces": new Map(), "was-coupons": new Map() };
+  tables = { "was-spaces": new Map(), "was-coupons": new Map(), "was-feed": new Map() };
+
+  // The feed table's rows, keyed by bucket and record; the by-position
+  // index is a sort over them.
+  feedKey = (key) => `${key.bucket.S}|${key.record.S}`;
+
+  async feed(command) {
+    const input = command.input;
+    const table = this.tables["was-feed"];
+    const values = input.ExpressionAttributeValues ?? {};
+    const names = input.ExpressionAttributeNames ?? {};
+    const attr = (token) => names[token] ?? token;
+    switch (command.constructor.name) {
+      case "GetItemCommand":
+        return { Item: table.get(this.feedKey(input.Key)) };
+      case "PutItemCommand":
+        table.set(this.feedKey(input.Item), input.Item);
+        return {};
+      case "DeleteItemCommand":
+        table.delete(this.feedKey(input.Key));
+        return {};
+      case "UpdateItemCommand": {
+        // ADD #n :one SET #g = if_not_exists(#g, :gen), #c = :collection
+        const key = this.feedKey(input.Key);
+        const next = { ...(table.get(key) ?? input.Key) };
+        const [, addClause, setClause] = /^ADD (.+?) SET (.+)$/s.exec(input.UpdateExpression);
+        const [addName, addValue] = addClause.split(/\s+/);
+        const current = Number(next[attr(addName)]?.N ?? 0);
+        next[attr(addName)] = { N: String(current + Number(values[addValue].N)) };
+        // Clauses split on the commas between assignments, not inside a function
+        for (const clause of setClause.split(/,\s*(?=#?\w+\s*=)/).map((c) => c.trim())) {
+          const [lhs, rhs] = clause.split(/\s*=\s*(.*)/s);
+          const exists = /if_not_exists\((#?\w+),\s*(:\w+)\)/.exec(rhs);
+          if (exists) {
+            next[attr(lhs)] = next[attr(exists[1])] ?? values[exists[2]];
+          } else {
+            next[attr(lhs)] = values[rhs];
+          }
+        }
+        table.set(key, next);
+        return { Attributes: next };
+      }
+      case "QueryCommand": {
+        let rows;
+        if (input.IndexName === "by-position") {
+          const feed = values[":feed"].S;
+          const after = Number(values[":after"].N);
+          rows = [...table.values()]
+            .filter((it) => it.feed?.S === feed && it.position !== undefined && Number(it.position.N) > after)
+            .sort((a, b) => Number(a.position.N) - Number(b.position.N));
+        } else {
+          const bucket = values[":bucket"].S;
+          const prefix = values[":prefix"]?.S ?? "";
+          rows = [...table.values()]
+            .filter((it) => it.bucket.S === bucket && it.record.S.startsWith(prefix))
+            .sort((a, b) => (a.record.S < b.record.S ? -1 : 1));
+        }
+        let start = 0;
+        if (input.ExclusiveStartKey) {
+          const key = this.feedKey(input.ExclusiveStartKey);
+          start = rows.findIndex((it) => this.feedKey(it) === key) + 1;
+        }
+        const limit = input.Limit ?? rows.length;
+        const page = rows.slice(start, start + limit);
+        const last = page[page.length - 1];
+        return {
+          Items: page,
+          ...(start + limit < rows.length && last && { LastEvaluatedKey: { bucket: last.bucket, record: last.record } }),
+        };
+      }
+      default:
+        throw new Error(`FakeDynamo: unsupported feed command ${command.constructor.name}`);
+    }
+  }
 
   table(name) {
     const table = this.tables[name];
@@ -186,6 +275,9 @@ export class FakeDynamo {
 
   async send(command) {
     const input = command.input;
+    if (input.TableName === "was-feed") {
+      return this.feed(command);
+    }
     switch (command.constructor.name) {
       case "GetItemCommand":
         return { Item: this.table(input.TableName).get(this.keyOf(input)) };
@@ -253,8 +345,10 @@ export class FakeDynamo {
 export function installFakes() {
   const fakeS3 = new FakeS3();
   const fakeDynamo = new FakeDynamo();
+  const fakeSqs = new FakeSqs();
   s3.S3Client.prototype.send = (command) => fakeS3.send(command);
   ddb.DynamoDBClient.prototype.send = (command) => fakeDynamo.send(command);
   authorizerDdb.DynamoDBClient.prototype.send = (command) => fakeDynamo.send(command);
-  return { s3: fakeS3, dynamo: fakeDynamo };
+  sqs.SQSClient.prototype.send = (command) => fakeSqs.send(command);
+  return { s3: fakeS3, dynamo: fakeDynamo, sqs: fakeSqs };
 }

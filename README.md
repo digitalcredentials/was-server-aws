@@ -37,6 +37,7 @@ to the canonical one.
 | GET / PUT / DELETE | `/space/{s}/{c}/policy` | `CollectionPolicy{Get,Put,Delete}Fn` | the Collection's policy |
 | GET, HEAD | `/space/{s}/{c}/meta/log` | `CollectionLogGetFn` | the Collection's governing history log (JSON Lines) |
 | PUT | `/space/{s}/{c}/meta/log` | `CollectionLogPutFn` | declare it (`If-None-Match: *`) or append one entry (`If-Match`) |
+| POST, GET | `/space/{s}/{c}/query` | `CollectionQueryFn` | the `changes` query profile: the Collection's replication feed |
 | GET, HEAD | `/space/{s}/{c}/{r}` | `ResourceGetFn` | Resource content |
 | PUT | `/space/{s}/{c}/{r}` | `ResourcePutFn` | create or replace it |
 | DELETE | `/space/{s}/{c}/{r}` | `ResourceDeleteFn` | delete it (permanently) |
@@ -159,6 +160,52 @@ authorization profile entry, and names the core feature tokens as the
 specification's conformance table spells them (`listing`,
 `collection-management`, `space-management`, `metadata`, `policy`,
 `export`, `encryption`).
+
+### The changes feed
+
+`POST /space/{s}/{c}/query` with `{"profile": "changes", "checkpoint"?,
+"limit"?}` (or the `GET` form with the same parameters in the query string,
+for a read-only capability) answers the Collection's replication feed (PWS
+v0.5, Query Profile Registry): `{"documents": [...], "checkpoint"}`, one
+entry per record at the position of its latest write, in position order.
+A `resource` entry carries the Resource's live state (`contentType`,
+`etag` as a read answers it, `data` for a JSON Resource, `custom` and
+`metaEtag` when metadata was written, `createdBy`, `epoch`, `writerId`);
+a deleted Resource or policy is a tombstone (`deleted: true`, no `data`);
+`collection-metadata`, `log` and `policy` entries carry the sub-resource's
+URL and validator. Every entry carries the opaque checkpoint that resumes
+after it, the page's `checkpoint` is the last entry's, and `null` means the
+end. A checkpoint not issued for this Collection (or from before the
+Collection was deleted and re-created) is refused with
+`invalid-request-body` at `#/checkpoint`, and the client starts over. Any
+other profile is `unsupported-operation` (501). A query needs read
+authorization: a capability covering the Collection, or a `PublicCanRead`
+policy. Advertised as `changes-query`; the core entry also carries the
+store's `originId` (`ORIGIN_ID`, default `dcc-was-sandbox`).
+
+S3 stays the system of record. The feed is a DynamoDB projection
+(`was-feed`: one row per record, keyed by bucket and
+`{collection}#{kind}#{record}`, with a per-Collection counter row and a
+`by-position` index) kept by a pipeline the buckets' object events drive:
+every Space bucket publishes to EventBridge, a rule routes the `dcc-was-*`
+events to a FIFO queue in one message group, and `FeedConsumerFn`
+(`src/feed/consumer`) applies them in order, taking the next position from
+the counter and writing the record's row (a stale event by S3 sequencer, or
+one that changes nothing, is skipped; the delete of a Collection's metadata
+object drops its feed). A query hydrates each row from the object's live
+state, so the entry is what a read answers at that moment, a few seconds
+after the write. `FeedSweepFn` (`src/feed/sweep`) compares a bucket's
+objects with its rows and queues an event for every record the feed lacks
+or has wrong, and enables event publishing on a bucket created before the
+feed existed:
+
+```bash
+aws lambda invoke --function-name <stack>-FeedSweepFn-... --payload '{}' /dev/stdout
+```
+
+Run it once after the first deploy, for the Spaces that predate the feed.
+(`was-lib/feed.mjs` holds the whole of it; the `blinded-index` profile is
+not served.)
 
 ### did:webvh controllers
 
@@ -446,7 +493,7 @@ response deliberately says only `404`.
 - **Export is bounded by the gateway's response size** (4 MB of archive);
   no provenance is signed or verified.
 - Optional profiles not implemented: chunked resources, quotas, backends,
-  linksets, query.
+  linksets, the `blinded-index` query profile.
 
 ## Resources
 

@@ -13,6 +13,9 @@ import assert from "node:assert/strict";
 import { installFakes } from "./fakes.mjs";
 import { invoke, seedSpace, seedObject, controllerKey, strangerKey, BASE, asWebvh, mintWebvh, seedWebvhLog, bucketOf, clearWebvhCache } from "./harness.mjs";
 import { deriveSpaceId } from "was-lib/webvh.mjs";
+import { applyObjectEvent, readCounter, classifyKey } from "was-lib/feed.mjs";
+import { sweepBucket, lambdaHandler as sweep } from "../src/feed/sweep/app.mjs";
+import { lambdaHandler as feedConsumer } from "../src/feed/consumer/app.mjs";
 import { updateDID, signerFromDidKeySigner, logToJsonlString } from "@interop/did-method-webvh";
 import { ZcapClient } from "@interop/ezcap";
 import { Ed25519Signature2020 } from "@interop/ed25519-signature";
@@ -1237,4 +1240,230 @@ test("a Space archive carries a governing log, and an import restores it", async
   assert.equal(meta.json.encryption.history.resource, `${BASE}/space/${SPACE_B}/gov/meta/log`);
   const again = await invoke({ method: "POST", path: `/space/${SPACE_B}/import`, body: Buffer.from(exported.body, "base64"), contentType: "application/x-tar" });
   assert.equal(again.json.logsSkipped, 1);
+});
+
+// --- the changes feed ------------------------------------------------------------
+
+let sequence = 0;
+// One object event as the bucket publishes it, applied as the consumer
+// applies it; the sequencer orders the events of one key.
+async function objectEvent(key, { deleted = false, bucket = SPACE } = {}) {
+  const object = deleted ? null : fakes.s3.buckets.get(bucket).get(key);
+  sequence += 1;
+  return applyObjectEvent({
+    bucket,
+    key,
+    deleted,
+    etag: object?.etag?.replace(/"/g, ""),
+    sequencer: sequence.toString(16).padStart(16, "0"),
+    time: new Date(Date.UTC(2026, 10, 11, 0, 0, sequence)).toISOString(),
+  });
+}
+
+// Every object of the bucket, as events in key order (what the sweep and
+// the pipeline together establish for a bucket that predates the feed)
+async function feedEverything(bucket = SPACE) {
+  for (const key of fakes.s3.keys(bucket)) {
+    if (classifyKey(key) !== null) {
+      await objectEvent(key, { bucket });
+    }
+  }
+}
+
+const query = (c, body, extra = {}) => invoke({ method: "POST", path: `/space/${SPACE}/${c}/query`, json: body, ...extra });
+
+test("the consumer positions each record at its latest write, ignores stale events, tombstones deletes and drops a deleted Collection's feed", async () => {
+  await seedObject(fakes, SPACE, "collections/notes/one", { v: 1 });
+  await seedObject(fakes, SPACE, "collections/notes/two", { v: 2 });
+  const first = await objectEvent("collections/notes/one");
+  const second = await objectEvent("collections/notes/two");
+  assert.equal(first.outcome, "positioned");
+  assert.equal(first.position, 1);
+  assert.equal(second.position, 2);
+  const generation = first.generation;
+  assert.ok(generation);
+  await seedObject(fakes, SPACE, "collections/notes/one", { v: 11 });
+  const moved = await objectEvent("collections/notes/one");
+  assert.equal(moved.position, 3, "a rewritten record moves to the next position");
+  const stale = await applyObjectEvent({ bucket: SPACE, key: "collections/notes/one", deleted: false, etag: "x", sequencer: "0000000000000001" });
+  assert.equal(stale.outcome, "stale");
+  fakes.s3.buckets.get(SPACE).delete("collections/notes/two");
+  const gone = await objectEvent("collections/notes/two", { deleted: true });
+  assert.equal(gone.position, 4);
+  await seedObject(fakes, SPACE, "meta/notes/one.json", { custom: { name: "one" } });
+  const annotated = await objectEvent("meta/notes/one.json");
+  assert.equal(annotated.position, 5, "a metadata-only edit re-surfaces the Resource");
+  await seedObject(fakes, SPACE, "meta/notes.json", { id: "notes", type: ["Collection"] });
+  assert.equal((await objectEvent("meta/notes.json")).position, 6);
+  await seedObject(fakes, SPACE, "policies/notes.json", { type: "PublicCanRead" });
+  assert.equal((await objectEvent("policies/notes.json")).position, 7);
+  assert.equal((await objectEvent("meta/space.json")).outcome, "ignored");
+  assert.deepEqual(await readCounter(SPACE, "notes"), { next: 7, generation });
+  // The Collection's metadata object going away drops its whole feed
+  fakes.s3.buckets.get(SPACE).delete("meta/notes.json");
+  assert.equal((await objectEvent("meta/notes.json", { deleted: true })).outcome, "purged");
+  assert.equal(await readCounter(SPACE, "notes"), null);
+  assert.equal([...fakes.dynamo.tables["was-feed"].keys()].filter((k) => k.includes("|notes#")).length, 0);
+});
+
+test("POST /space/{s}/{c}/query with the changes profile serves the feed in order, resumable by checkpoint, ending in null", async () => {
+  await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: "notes", name: "Notes" } });
+  await invoke({ method: "PUT", path: `/space/${SPACE}/notes/one`, json: { v: 1 }, headers: { "key-epoch": "e1", "writer-id": "w1" } });
+  await invoke({ method: "PUT", path: `/space/${SPACE}/notes/two`, json: { v: 2 } });
+  await invoke({ method: "PUT", path: `/space/${SPACE}/notes/one/meta`, json: { custom: { name: "One" } } });
+  await invoke({ method: "PUT", path: `/space/${SPACE}/notes/policy`, json: { type: "PublicCanRead" } });
+  await invoke({ method: "PUT", path: `/space/${SPACE}/notes/blob`, body: Buffer.from([1, 2, 3]), contentType: "application/octet-stream" });
+  await feedEverything();
+
+  const empty = await query("other", { profile: "changes" });
+  assert.equal(empty.status, 404, "a Collection that does not exist");
+  const page1 = await query("notes", { profile: "changes", limit: 2 });
+  assert.equal(page1.status, 200, page1.body);
+  assert.equal(page1.json.documents.length, 2);
+  assert.equal(typeof page1.json.checkpoint, "string");
+  assert.equal(page1.json.checkpoint, page1.json.documents[1].checkpoint);
+  const page2 = await query("notes", { profile: "changes", checkpoint: page1.json.checkpoint, limit: 100 });
+  assert.equal(page2.status, 200, page2.body);
+  const all = [...page1.json.documents, ...page2.json.documents];
+  assert.deepEqual(all.map((d) => `${d.kind}:${d.id.replace(SPACE_URL, "")}`).sort(), [
+    "collection-metadata:notes/meta",
+    "policy:notes/policy",
+    "resource:blob",
+    "resource:one",
+    "resource:two",
+  ]);
+  assert.deepEqual(
+    all.map((d) => d.updatedAtCounter),
+    [...all.map((d) => d.updatedAtCounter)].sort((a, b) => a - b),
+    "entries come in position order"
+  );
+  const one = all.find((d) => d.kind === "resource" && d.id === "one");
+  const read = await invoke({ path: `/space/${SPACE}/notes/one` });
+  const readMeta = await invoke({ path: `/space/${SPACE}/notes/one/meta` });
+  assert.deepEqual(one.data, { v: 1 });
+  assert.equal(one.contentType, "application/json");
+  assert.equal(one.deleted, false);
+  assert.equal(one.etag, read.headers.etag, "the entry's etag is the one a read answers");
+  assert.equal(one.metaEtag, readMeta.headers.etag);
+  assert.deepEqual(one.custom, { name: "One" });
+  assert.equal(one.epoch, "e1");
+  assert.equal(one.writerId, "w1");
+  assert.equal(one.createdBy, controllerKey.controller);
+  assert.equal(one.originId, "dcc-was-sandbox");
+  assert.ok(one.updatedAt && one.generation && one.checkpoint);
+  const blob = all.find((d) => d.id === "blob");
+  assert.equal(blob.contentType, "application/octet-stream");
+  assert.equal(blob.data, undefined, "a binary Resource carries no data");
+  const meta = all.find((d) => d.kind === "collection-metadata");
+  assert.equal(meta.etag, (await invoke({ path: `/space/${SPACE}/notes/meta` })).headers.etag);
+  assert.equal(meta.deleted, false);
+  // The end of the feed: nothing new answers null, never the checkpoint sent
+  const end = await query("notes", { profile: "changes", checkpoint: page2.json.checkpoint });
+  assert.deepEqual(end.json, { documents: [], checkpoint: null });
+  // The GET form, for a read-only capability, answers the same page
+  const get = await invoke({ path: `/space/${SPACE}/notes/query?profile=changes&limit=2` });
+  assert.equal(get.status, 200, get.body);
+  assert.deepEqual(get.json, page1.json);
+  // A checkpoint this server did not issue for this Collection
+  const foreign = await query("notes", { profile: "changes", checkpoint: Buffer.from(JSON.stringify({ feed: `${SPACE_URL}other/`, generation: "x", position: 1 })).toString("base64url") });
+  assert.equal(foreign.status, 400);
+  assert.equal(foreign.json.type, "https://w3id.org/pws#invalid-request-body");
+  assert.equal(foreign.json.errors[0].pointer, "#/checkpoint");
+  const garbled = await query("notes", { profile: "changes", checkpoint: "not-a-checkpoint" });
+  assert.equal(garbled.status, 400);
+  assert.equal(garbled.json.errors[0].pointer, "#/checkpoint");
+  // Profiles
+  const noProfile = await query("notes", { limit: 1 });
+  assert.equal(noProfile.status, 400);
+  assert.equal(noProfile.json.errors[0].pointer, "#/profile");
+  const other = await query("notes", { profile: "blinded-index", index: "x", equals: [] });
+  assert.equal(other.status, 501);
+  assert.equal(other.json.type, "https://w3id.org/pws#unsupported-operation");
+  // A delete surfaces as a tombstone at a new position
+  await invoke({ method: "DELETE", path: `/space/${SPACE}/notes/two` });
+  await objectEvent("collections/notes/two", { deleted: true });
+  const afterDelete = await query("notes", { profile: "changes", checkpoint: page2.json.checkpoint });
+  assert.equal(afterDelete.json.documents.length, 1);
+  const tomb = afterDelete.json.documents[0];
+  assert.equal(tomb.id, "two");
+  assert.equal(tomb.deleted, true);
+  assert.equal(tomb.data, undefined);
+  assert.equal(tomb.contentType, "application/json");
+  assert.match(tomb.etag, /^"deleted\.\d+"$/);
+  assert.equal(afterDelete.json.checkpoint, tomb.checkpoint);
+});
+
+test("a query needs read authorization: a capability, or a PublicCanRead policy", async () => {
+  await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: "open" } });
+  await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: "closed" } });
+  await invoke({ method: "PUT", path: `/space/${SPACE}/open/policy`, json: { type: "PublicCanRead" } });
+  await feedEverything();
+  const hidden = await query("closed", { profile: "changes" }, { signer: null });
+  assert.equal(hidden.status, 404);
+  const stranger = await query("closed", { profile: "changes" }, { signer: strangerKey });
+  assert.equal(stranger.status, 404);
+  const open = await query("open", { profile: "changes" }, { signer: null });
+  assert.equal(open.status, 200, open.body);
+  assert.equal(open.json.documents.some((d) => d.kind === "policy"), true);
+});
+
+test("the feed carries a governed Collection's log and its service description advertises the profile", async () => {
+  await governedCollection();
+  await feedEverything();
+  const page = await query("gov", { profile: "changes" });
+  assert.equal(page.status, 200, page.body);
+  const log = page.json.documents.find((d) => d.kind === "log");
+  assert.equal(log.id, `${SPACE_URL}gov/meta/log`);
+  assert.equal(log.etag, (await invoke({ path: logPath("gov") })).headers.etag);
+  assert.equal(log.deleted, false);
+  const service = await invoke({ path: "/service", signer: null });
+  const core = service.json.specs["https://w3id.org/pws"][0];
+  assert.ok(core.features.includes("changes-query"));
+  assert.ok(core.features.includes("created-by"));
+  assert.equal(core.originId, "dcc-was-sandbox");
+});
+
+test("the consumer applies a queue batch and reports the records that failed", async () => {
+  await seedObject(fakes, SPACE, "collections/notes/one", { v: 1 });
+  const message = (detail, type = "Object Created") => ({
+    messageId: `m-${Math.random()}`,
+    body: JSON.stringify({ "detail-type": type, time: "2026-11-11T00:00:00Z", detail }),
+  });
+  const out = await feedConsumer({
+    Records: [
+      message({ bucket: { name: SPACE }, object: { key: "collections/notes/one", etag: "abc", sequencer: "0000000000000001" } }),
+      message({ bucket: { name: SPACE }, object: { key: "meta/space.json", etag: "abc", sequencer: "0000000000000002" } }),
+      { messageId: "broken", body: "not json" },
+    ],
+  });
+  assert.deepEqual(out.batchItemFailures, [{ itemIdentifier: "broken" }]);
+  assert.equal((await readCounter(SPACE, "notes")).next, 1);
+});
+
+test("the sweep queues an event for every record the feed lacks or has wrong", async () => {
+  await seedObject(fakes, SPACE, "collections/notes/one", { v: 1 });
+  await seedObject(fakes, SPACE, "collections/notes/two", { v: 2 });
+  await seedObject(fakes, SPACE, "meta/notes.json", { id: "notes", type: ["Collection"] });
+  await objectEvent("collections/notes/one");
+  await seedObject(fakes, SPACE, "collections/notes/one", { v: 11 }); // rewritten after its event
+  await seedObject(fakes, SPACE, "collections/notes/three", { v: 3 });
+  await objectEvent("collections/notes/three");
+  fakes.s3.buckets.get(SPACE).delete("collections/notes/three"); // gone without a delete event
+  const events = await sweepBucket(SPACE);
+  const summary = events.map((e) => `${e["detail-type"]}:${e.detail.object.key}`).sort();
+  assert.deepEqual(summary, [
+    "Object Created:collections/notes/one",
+    "Object Created:collections/notes/two",
+    "Object Created:meta/notes.json",
+    "Object Deleted:collections/notes/three",
+  ]);
+  const report = await sweep({ buckets: [SPACE] });
+  assert.deepEqual(report, { [SPACE]: { queued: 4 } });
+  assert.equal(fakes.sqs.messages.length, 4);
+  assert.equal(fakes.sqs.messages[0].MessageGroupId, "feed");
+  // Applied in order, the queued events settle the feed
+  for (const { body } of fakes.sqs.messages) {
+    await applyObjectEvent({ bucket: SPACE, key: body.detail.object.key, deleted: body["detail-type"] === "Object Deleted", etag: body.detail.object.etag, time: body.time });
+  }
+  assert.deepEqual(await sweepBucket(SPACE), []);
 });
