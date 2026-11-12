@@ -941,8 +941,9 @@ test("a delegated capability authorizes Resource and Collection operations under
     });
     assert.equal(renamed.status, 200, `${SuiteClass.name}: ${renamed.body}`);
 
-    // The Space itself and its metadata are container operations: a
-    // delegated capability is refused with a 404; so is deleting a Collection
+    // The Space itself and its metadata are container operations: a data
+    // grant on the Space (this one carries DELETE beside GET and PUT) is
+    // refused with a 404; so is deleting a Collection
     const spaceGone = await invoke({ method: "DELETE", path: `/space/${SPACE}/`, signer: strangerKey, capability });
     assert.equal(spaceGone.status, 404);
     assert.ok(fakes.s3.buckets.has(bucketOf(SPACE)));
@@ -957,6 +958,40 @@ test("a delegated capability authorizes Resource and Collection operations under
     const collectionGone = await invoke({ method: "DELETE", path: `/space/${SPACE}/keyring/`, signer: strangerKey, capability });
     assert.equal(collectionGone.status, 404);
   }
+});
+
+// The container rule's one exception: a delegated capability whose tail
+// targets exactly the Space URL and allows exactly DELETE deletes the Space
+// (how a wallet deletes a retired credential's unlock Space, through a
+// DELETE-only child of the management capability it was delegated).
+test("a target-exact DELETE-only delegated capability deletes the Space; it deletes no Collection, and a broader tail is refused", async () => {
+  // A DELETE-only grant from the controller deletes no Collection: Delete
+  // Collection stays root-only
+  const deleteOnly = await delegateSpace(EddsaJcs2022, ["DELETE"]);
+  const collectionGone = await invoke({ method: "DELETE", path: `/space/${SPACE}/keyring/`, signer: strangerKey, capability: deleteOnly });
+  assert.equal(collectionGone.status, 404);
+  // A management-shaped grant (every verb, to the stranger) does not delete
+  // the Space itself ...
+  const management = await delegateSpace(EddsaJcs2022, ["GET", "PUT", "DELETE", "POST"]);
+  const broad = await invoke({ method: "DELETE", path: `/space/${SPACE}/`, signer: strangerKey, capability: management });
+  assert.equal(broad.status, 404);
+  assert.ok(fakes.s3.buckets.has(bucketOf(SPACE)));
+  // ... but its holder narrows it into a DELETE-only child for a third
+  // party, whose invocation of that child deletes the Space
+  const child = await new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: strangerKey.signer() }).delegate({
+    capability: management,
+    controller: thirdKey.controller,
+    invocationTarget: SPACE_URL,
+    allowedActions: ["DELETE"],
+    expires: new Date(Date.now() + 600 * 1000),
+  });
+  const removed = await invoke({ method: "DELETE", path: `/space/${SPACE}/`, signer: thirdKey, capability: child });
+  assert.equal(removed.status, 204, removed.body);
+  assert.equal(fakes.s3.buckets.has(bucketOf(SPACE)), false);
+  assert.equal(fakes.dynamo.tables["pws-spaces"].has(`${BASE}/space/${SPACE}`), false);
+  // Idempotent, as for the controller: the Space is gone either way
+  const again = await invoke({ method: "DELETE", path: `/space/${SPACE}/`, signer: thirdKey, capability: child });
+  assert.equal(again.status, 404);
 });
 
 test("a delegated capability is refused for an action it does not allow, and without it the stranger is refused", async () => {

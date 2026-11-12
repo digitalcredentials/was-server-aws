@@ -82,6 +82,10 @@ Globals:
         COUPONS_TABLE_NAME: pws-coupons
         SPACE_URL_BASE: !Ref SpaceBaseUrl
         ID_DOMAIN: !Ref IdDomain
+        # The largest did:webvh log the resolver fetches (was-lib/webvh.mjs;
+        # 8 MiB). Every entry of an account's log carries the whole account
+        # document, so a long-lived account's log runs to megabytes.
+        WEBVH_MAX_LOG_BYTES: "8388608"
         INSTANCE_VERSION: '0.5.0'
         FEED_TABLE_NAME: !Ref PwsFeedTable
         FEED_QUEUE_URL: !Ref FeedQueue
