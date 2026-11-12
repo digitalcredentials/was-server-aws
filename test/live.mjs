@@ -215,8 +215,39 @@ try {
   check("configure() on a derived id provisions an unlock Space", made.description.controller === unlockKey.controller && made.description.type.includes("UnlockSpace"), JSON.stringify(made.description.type));
   const record = await unlock.collection("keyring", { encryption: "plaintext" }).resource("keyring.json").put(new TextEncoder().encode('{"wrapped":"..."}'), { contentType: "application/json" });
   check("the unlock Space takes a record", Boolean(record.etag));
+
+  // The container rule's Space-delete exception, the way a wallet deletes a
+  // retired credential's unlock Space: the unlock identity delegates the
+  // Space's management to the account, the account narrows that into a
+  // DELETE-only child for a did:key, and the child's invocation deletes the
+  // Space. The management grant itself, a data grant, does not.
+  const unlockUrl = `${WAS}/space/${unlockId}/`;
+  const unlockZcap = new ZcapClient({ SuiteClass: EddsaJcs2022, invocationSigner: unlockKey.signer(), delegationSigner: unlockKey.signer() });
+  const management = await unlockZcap.delegate({
+    capability: `urn:zcap:root:${encodeURIComponent(unlockUrl)}`,
+    controller: minted.did,
+    invocationTarget: unlockUrl,
+    allowedActions: ["GET", "PUT", "DELETE", "POST"],
+    expires: new Date(Date.now() + 3600 * 1000),
+  });
+  const accountZcap = new ZcapClient({ SuiteClass: EddsaJcs2022, invocationSigner: accountSigner, delegationSigner: accountSigner });
+  const broad = await outcomeOf(accountZcap.request({ url: unlockUrl, method: "DELETE", action: "DELETE", capability: management }));
+  check("a management-shaped delegated capability does not delete the unlock Space (the container rule)", broad.status === 404, broad.status);
+  const deleterKey = await Ed25519VerificationKey.generate({ seed: createHash("sha256").update(`${SEED}/deleter`).digest() });
+  deleterKey.controller = `did:key:${deleterKey.fingerprint()}`;
+  deleterKey.id = `${deleterKey.controller}#${deleterKey.fingerprint()}`;
+  const deletion = await accountZcap.delegate({
+    capability: management,
+    controller: deleterKey.controller,
+    invocationTarget: unlockUrl,
+    allowedActions: ["DELETE"],
+    expires: new Date(Date.now() + 600 * 1000),
+  });
+  const deleterClient = new ZcapClient({ SuiteClass: EddsaJcs2022, invocationSigner: deleterKey.signer(), delegationSigner: deleterKey.signer() });
+  const viaChild = await outcomeOf(deleterClient.request({ url: unlockUrl, method: "DELETE", action: "DELETE", capability: deletion }));
+  check("a DELETE-only child of the management capability deletes the unlock Space (the exception)", viaChild.status === 204, `${viaChild.status} ${viaChild.type ?? ""}`);
   const unlockGone = await unlock.deleteWithOutcome();
-  check("the unlock Space deletes", unlockGone.outcome === "deleted");
+  check("the unlock Space is gone for its controller too", unlockGone.outcome === "not-found", unlockGone.outcome);
 
   // --- create-by-id under open provisioning (OPEN_PROVISIONING=true when
   // the deployment's OpenProvisioning parameter is on) --------------------
