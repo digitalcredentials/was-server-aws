@@ -298,7 +298,10 @@ single path segment is a Space id names the log published in that Space's
 freshly published log is seen at once and no public-read policy is
 involved. Any other `did:webvh` is fetched over HTTPS from the location the
 DID encodes, with a timeout (`WEBVH_FETCH_TIMEOUT_MS`, 3000) and a size cap
-(`WEBVH_MAX_LOG_BYTES`, 1 MiB). One verifier, two fetchers.
+(`WEBVH_MAX_LOG_BYTES`: the code's default is 1 MiB, and the template sets
+8 MiB, since every entry of an account's log carries the whole account
+document and a long-lived account's log runs to megabytes). One verifier,
+two fetchers.
 
 The identity domain itself is a CloudFront distribution the stack creates
 (`IdDistribution`, aliased to `IdDomain` under `IdCertificateArn`, with
@@ -402,9 +405,11 @@ signed by any other key passes untouched, as does a chain with no
 
 The clause is applied by the authorizer on every verification and by the
 revocation endpoint on its own (without the invocation-time bounds, which
-have no operation to bound there). The container rule keeps Delete Space
-and Update Space Metadata root-only regardless, so the bounds are defense
-in depth here.
+have no operation to bound there). The container rule keeps Update Space
+Metadata root-only and admits a Space DELETE only through a tail that is a
+target-exact DELETE-only grant (its one exception, below), so the bounds
+are what keeps a password session from narrowing its whole-subtree
+generation delegation into such a tail.
 
 ### Status codes, validators, errors
 
@@ -471,10 +476,15 @@ answers are different.
   `spaceController`, `spaceType`, or `space=missing`).
 - **Each function** turns that context into the spec's answer through the
   shared `authorize()` ([layers/was-lib/.../auth.mjs](layers/was-lib/nodejs/node_modules/was-lib/auth.mjs)):
-  a verified invocation proceeds; the container rule (`DELETE /space/{s}/`,
-  `PUT /space/{s}/meta`, `DELETE /space/{s}/{c}/`) refuses a delegated
-  capability, while `PUT /space/{s}/{c}/meta` takes any chain that covers
-  the URL; the `Digest` header a signed body carries is
+  a verified invocation proceeds; the container rule (`PUT /space/{s}/meta`,
+  `DELETE /space/{s}/{c}/`) refuses a delegated capability, and
+  `DELETE /space/{s}/` takes one only when the invoked capability targets
+  exactly the Space's URL and allows exactly `DELETE` (the Space-delete
+  exception, judged by the authorizer's container-rule inspector,
+  [src/authorizer/container.mjs](src/authorizer/container.mjs): how a wallet
+  deletes a retired credential's unlock Space through a DELETE-only child of
+  the management capability it holds), while `PUT /space/{s}/{c}/meta`
+  takes any chain that covers the URL; the `Digest` header a signed body carries is
   recomputed over the received bytes (`400 invalid-authorization-header` on
   mismatch — the authorizer never sees the body, so this is what binds the
   signature to it); an unsigned `GET`/`HEAD` is allowed where a
@@ -657,14 +667,11 @@ response deliberately says only `404`.
 - **Revocation records are not part of the Space archive**: an export
   carries no `revocations/` entries and an import installs none, where the
   reference server archives them under `.revocations/`.
-- **The container rule covers the Space, with no exceptions**: the
-  reference server lets a delegated chain whose tail is a target-exact
-  `DELETE`-only grant delete a Space; here `DELETE /space/{s}/` and
-  `PUT /space/{s}/meta` stay root-only. Below the Space, `PUT .../{c}/meta`
-  (creating or configuring a Collection) and `PUT .../meta/log` take any
-  chain that covers the URL, as on the reference server: a delegated
-  client creates the Collections it writes (wallet-core's transient
-  clients mint their annex generation this way).
+- **Below the Space, `PUT .../{c}/meta`** (creating or configuring a
+  Collection) and `PUT .../meta/log` take any chain that covers the URL, as
+  on the reference server: a delegated client creates the Collections it
+  writes (wallet-core's transient clients mint their annex generation this
+  way).
 - Optional profiles not implemented: chunked resources, quotas, backends,
   linksets, the `blinded-index` query profile.
 

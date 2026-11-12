@@ -7,10 +7,13 @@ import { purgeBucket } from "was-lib/feed.mjs";
 import { isCouponlessRow, releaseCouponlessSlot } from "was-lib/quota.mjs";
 
 // DELETE /space/{s}/ -- the whole Space: its bucket (emptied first) and its
-// registry row. Root capability only (the container rule). An
-// already-missing bucket is tolerated so a half-deleted Space can be
-// cleaned up by retrying. A Space created without a coupon gives its slot
-// under the global cap back.
+// registry row. The root capability, or a delegated capability whose tail
+// targets exactly this Space's URL and allows exactly DELETE: the container
+// rule's Space-delete exception, which the authorizer's container-rule
+// inspector (src/authorizer/container.mjs) applies, so this handler takes a
+// verified delegated chain. An already-missing bucket is tolerated so a
+// half-deleted Space can be cleaned up by retrying. A Space created without
+// a coupon gives its slot under the global cap back.
 
 const dynamo = new DynamoDBClient({});
 const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
@@ -37,5 +40,5 @@ export const lambdaHandler = handler(
     await purgeBucket(bucketOf(spaceId));
     return noContent(req, NO_STORE);
   },
-  { scope: "space", rootOnly: true }
+  { scope: "space" }
 );

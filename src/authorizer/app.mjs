@@ -9,6 +9,7 @@ import { getSpace } from "./registry.mjs";
 import { composeChainInspectors } from "./chain.mjs";
 import { revocationChainInspector } from "./revocations.mjs";
 import { clientAnnexChainInspector } from "./annex.mjs";
+import { containerRuleInspector } from "./container.mjs";
 
 // The HTTP API's REQUEST authorizer (payload v2, simple responses): it
 // verifies a signed request's capability invocation and reports the result
@@ -60,6 +61,7 @@ const inspectorFor = ({ base, spaceId, target, method }) =>
   composeChainInspectors([
     ...(spaceId !== undefined ? [revocationChainInspector(spaceId)] : []),
     clientAnnexChainInspector({ serverUrl: base, invocation: { target, action: method } }),
+    containerRuleInspector({ serverUrl: base, invocation: { target, action: method } }),
   ]);
 
 function record(context, result) {
