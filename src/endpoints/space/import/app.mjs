@@ -44,7 +44,7 @@ import {
 // Every object the archive attests is reported `unattested`: this server
 // verifies no provenance yet.
 
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
 const dynamo = new DynamoDBClient({});
 
 async function mirrorName(registryUrl, name) {

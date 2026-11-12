@@ -13,7 +13,7 @@ import { isCouponlessRow, releaseCouponlessSlot } from "was-lib/quota.mjs";
 // under the global cap back.
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
 
 export const lambdaHandler = handler(
   async (req, { spaceId, registryUrl }) => {

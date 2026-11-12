@@ -26,7 +26,7 @@ import { Ed25519Signature2020 } from "@interop/ed25519-signature";
 import { EddsaJcs2022 } from "@interop/ed25519-signature/eddsa-jcs-2022";
 import { rootCapabilityId } from "../src/authorizer/zcap.mjs";
 
-const SPACE = "dcc-was-01011f5b-59ea-4e62-880e-d6ad666e361c";
+const SPACE = "dcc-pws-01011f5b-59ea-4e62-880e-d6ad666e361c";
 const SPACE_URL = `${BASE}/space/${SPACE}/`;
 const PROBLEM = "application/problem+json";
 
@@ -35,8 +35,8 @@ beforeEach(async () => {
   fakes = installFakes();
   clearWebvhCache();
   await seedSpace(fakes, { spaceId: SPACE });
-  fakes.dynamo.tables["was-coupons"].set("open-sesame", { coupon: { S: "open-sesame" } });
-  fakes.dynamo.tables["was-coupons"].set("one-shot", { coupon: { S: "one-shot" }, usesRemaining: { N: "1" } });
+  fakes.dynamo.tables["pws-coupons"].set("open-sesame", { coupon: { S: "open-sesame" } });
+  fakes.dynamo.tables["pws-coupons"].set("one-shot", { coupon: { S: "one-shot" }, usesRemaining: { N: "1" } });
 });
 
 const objectKeys = () => fakes.s3.keys(SPACE);
@@ -96,7 +96,7 @@ test("POST /spaces/ provisions a Space for the stated controller", async () => {
     json: { controller: controllerKey.controller, name: "Home", coupon: "open-sesame" },
   });
   assert.equal(res.status, 201, JSON.stringify(res.json));
-  assert.match(res.headers.location, /^http:\/\/localhost:3000\/space\/dcc-was-[0-9a-f-]{36}\/$/);
+  assert.match(res.headers.location, /^http:\/\/localhost:3000\/space\/dcc-pws-[0-9a-f-]{36}\/$/);
   assert.ok(res.headers.etag);
   assert.deepEqual(res.json.type, ["Space"]);
   assert.equal(res.json.name, "Home");
@@ -104,7 +104,7 @@ test("POST /spaces/ provisions a Space for the stated controller", async () => {
   const id = res.json.id;
   assert.ok(fakes.s3.buckets.has(id));
   assert.ok(fakes.s3.buckets.get(id).has("meta/space.json"));
-  const row = fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${id}`);
+  const row = fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${id}`);
   assert.equal(row.did.S, controllerKey.controller);
   assert.deepEqual(row.type.L, [{ S: "Space" }]);
 });
@@ -138,17 +138,17 @@ test("POST /spaces/ takes a client-chosen id (a wallet-core account Space, minte
   assert.equal(res.json.id, chosen);
   assert.equal(res.headers.location, `${BASE}/space/${chosen}/`);
   assert.ok(fakes.s3.buckets.has(bucketOf(chosen)));
-  assert.ok(fakes.dynamo.tables["was-spaces"].has(`${BASE}/space/${chosen}`));
+  assert.ok(fakes.dynamo.tables["pws-spaces"].has(`${BASE}/space/${chosen}`));
   // Genesis then finds the Space in place
   const meta = await invoke({ path: `/space/${chosen}/meta` });
   assert.equal(meta.status, 200);
   assert.equal(meta.json.controller, controllerKey.controller);
   // The id is taken; the coupon is not spent on the refusal
-  fakes.dynamo.tables["was-coupons"].set("once", { coupon: { S: "once" }, usesRemaining: { N: "1" } });
+  fakes.dynamo.tables["pws-coupons"].set("once", { coupon: { S: "once" }, usesRemaining: { N: "1" } });
   const taken = await invoke({ method: "POST", path: "/spaces/", json: { id: chosen, controller: controllerKey.controller, coupon: "once" } });
   assert.equal(taken.status, 409);
   assert.equal(taken.json.type, "https://w3id.org/pws#id-conflict");
-  assert.equal(fakes.dynamo.tables["was-coupons"].get("once").usesRemaining.N, "1");
+  assert.equal(fakes.dynamo.tables["pws-coupons"].get("once").usesRemaining.N, "1");
   // Malformed and reserved ids
   const malformed = await invoke({ method: "POST", path: "/spaces/", json: { id: "not a space id", controller: controllerKey.controller, coupon: "once" } });
   assert.equal(malformed.status, 400);
@@ -185,8 +185,8 @@ test("POST /spaces/ validates the body", async () => {
 });
 
 test("GET /spaces/ lists the signer's Spaces and pages them", async () => {
-  await seedSpace(fakes, { spaceId: "dcc-was-00000000-0000-4000-8000-000000000002", name: "Second" });
-  await seedSpace(fakes, { spaceId: "dcc-was-00000000-0000-4000-8000-000000000003", controller: strangerKey.controller });
+  await seedSpace(fakes, { spaceId: "dcc-pws-00000000-0000-4000-8000-000000000002", name: "Second" });
+  await seedSpace(fakes, { spaceId: "dcc-pws-00000000-0000-4000-8000-000000000003", controller: strangerKey.controller });
   const res = await invoke({ path: "/spaces/" });
   assert.equal(res.status, 200);
   assert.equal(res.json.totalItems, 2);
@@ -252,7 +252,7 @@ test("PUT /space/{s}/meta renames the Space under If-Match and mirrors the name 
   assert.equal(res.json.name, "Renamed");
   assert.ok(res.headers.etag && res.headers.etag !== current.headers.etag);
   assert.equal(res.headers["cache-control"], "no-store");
-  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE}`).name.S, "Renamed");
+  assert.equal(fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${SPACE}`).name.S, "Renamed");
 
   const stale = await invoke({
     method: "PUT",
@@ -631,7 +631,7 @@ test("policies are versioned and PublicCanRead opens unsigned reads at the cover
 // --- authorization ---------------------------------------------------------------
 
 test("requests to an unregistered Space, by a stranger, or with a tampered signature are 404", async () => {
-  const unregistered = await invoke({ path: `/space/dcc-was-00000000-0000-4000-8000-000000000009/meta` });
+  const unregistered = await invoke({ path: `/space/dcc-pws-00000000-0000-4000-8000-000000000009/meta` });
   assert.equal(unregistered.status, 404);
   const stranger = await invoke({ path: `/space/${SPACE}/meta`, signer: strangerKey });
   assert.equal(stranger.status, 404);
@@ -650,14 +650,14 @@ test("DELETE /space/{s}/ removes the bucket and the registry row", async () => {
   const res = await invoke({ method: "DELETE", path: `/space/${SPACE}/` });
   assert.equal(res.status, 204);
   assert.equal(fakes.s3.buckets.has(SPACE), false);
-  assert.equal(fakes.dynamo.tables["was-spaces"].has(`${BASE}/space/${SPACE}`), false);
+  assert.equal(fakes.dynamo.tables["pws-spaces"].has(`${BASE}/space/${SPACE}`), false);
   const after = await invoke({ path: `/space/${SPACE}/meta` });
   assert.equal(after.status, 404);
 });
 
 // --- did:webvh controllers ---------------------------------------------------
 
-const ACCOUNT = "dcc-was-0000aaaa-0000-4000-8000-0000000000ab";
+const ACCOUNT = "dcc-pws-0000aaaa-0000-4000-8000-0000000000ab";
 
 test("a did:webvh-controlled Space authorizes the keys its current document lists", async () => {
   const account = await mintWebvh({ path: ACCOUNT });
@@ -753,7 +753,7 @@ test("PUT /space/{s}/meta promotes a did:key controller to a did:webvh that list
   assert.equal(promoted.status, 200, JSON.stringify(promoted.json));
   assert.equal(promoted.json.controller, account.did);
   assert.equal(promoted.json.createdBy, controllerKey.controller);
-  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE}`).did.S, account.did);
+  assert.equal(fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${SPACE}`).did.S, account.did);
 
   // From now on the did:key form no longer invokes; the document's key does
   const asKey = await invoke({ path: `/space/${SPACE}/meta` });
@@ -788,7 +788,7 @@ test("PUT /space/{s}/meta promotes to a did:webvh that lists the invoking key fo
   });
   assert.equal(promoted.status, 200, JSON.stringify(promoted.json));
   assert.equal(promoted.json.controller, account.did);
-  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE}`).did.S, account.did);
+  assert.equal(fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${SPACE}`).did.S, account.did);
   // The did:key form no longer invokes
   assert.equal((await invoke({ path: `/space/${SPACE}/meta` })).status, 404);
 });
@@ -805,7 +805,7 @@ test("PUT /space/{s}/meta refuses a promotion to a did:webvh that does not list 
   });
   assert.equal(res.status, 400);
   assert.equal(res.json.type, "https://w3id.org/pws#controller-mismatch");
-  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE}`).did.S, controllerKey.controller);
+  assert.equal(fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${SPACE}`).did.S, controllerKey.controller);
 });
 
 test("PUT /space/{s}/meta provisions an unlock Space whose id is derived from the signing DID", async () => {
@@ -819,8 +819,8 @@ test("PUT /space/{s}/meta provisions an unlock Space whose id is derived from th
   assert.ok(created.headers.etag);
   assert.ok(fakes.s3.buckets.has(bucketOf(id)));
   assert.notEqual(bucketOf(id), id);
-  assert.match(bucketOf(id), /^dcc-was-[0-9a-f]{40}$/);
-  const row = fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${id}`);
+  assert.match(bucketOf(id), /^dcc-pws-[0-9a-f]{40}$/);
+  const row = fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${id}`);
   assert.equal(row.did.S, controllerKey.controller);
   assert.deepEqual(row.type.L.map((entry) => entry.S), body.type);
 
@@ -843,7 +843,7 @@ test("PUT /space/{s}/meta provisions an unlock Space whose id is derived from th
   const deleted = await invoke({ method: "DELETE", path: `/space/${id}/` });
   assert.equal(deleted.status, 204);
   assert.ok(!fakes.s3.buckets.has(bucketOf(id)));
-  assert.ok(!fakes.dynamo.tables["was-spaces"].has(`${BASE}/space/${id}`));
+  assert.ok(!fakes.dynamo.tables["pws-spaces"].has(`${BASE}/space/${id}`));
 });
 
 test("self-provisioning is refused for any id not derived from the signer, and for a non-unlock type", async () => {
@@ -863,7 +863,7 @@ test("self-provisioning is refused for any id not derived from the signer, and f
   // A server-assigned-looking id nobody registered
   const unknown = await invoke({
     method: "PUT",
-    path: `/space/dcc-was-00000000-0000-4000-8000-0000000000ff/meta`,
+    path: `/space/dcc-pws-00000000-0000-4000-8000-0000000000ff/meta`,
     json: { name: "Unlock", controller: controllerKey.controller, type: unlock },
     headers: { "if-none-match": "*" },
   });
@@ -972,7 +972,7 @@ test("a delegated capability is refused for an action it does not allow, and wit
 
 import { readSpaceArchive } from "@interop/space-archive";
 
-const SPACE_B = "dcc-was-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b";
+const SPACE_B = "dcc-pws-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b";
 
 // A Space with two collections (one with metadata and a policy, one implicit),
 // three resources (JSON and binary, one with an annotation and a policy) and
@@ -1080,7 +1080,7 @@ test("POST /space/{s}/import merges an archive, skips what is held, and reports 
   assert.ok(fakes.s3.keys(SPACE_B).includes("policies/notes/one.json"));
   // The name was restored and mirrored
   assert.equal((await invoke({ path: `/space/${SPACE_B}/meta` })).json.name, "Test Space");
-  assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${SPACE_B}`).name.S, "Test Space");
+  assert.equal(fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${SPACE_B}`).name.S, "Test Space");
 
   // A second import changes nothing
   const again = await invoke({ method: "POST", path: `/space/${SPACE_B}/import`, body: archive, contentType: "application/x-tar" });
@@ -1112,7 +1112,7 @@ test("import under a delegated capability leaves the Space Metadata alone; a typ
   assert.equal(delegated.json.spaceMetadata, "skipped");
   assert.equal((await invoke({ path: `/space/${SPACE_B}/meta` })).json.name, "Other");
 
-  const batch = "dcc-was-0c0c0c0c-0c0c-4c0c-8c0c-0c0c0c0c0c0c";
+  const batch = "dcc-pws-0c0c0c0c-0c0c-4c0c-8c0c-0c0c0c0c0c0c";
   await seedSpace(fakes, { spaceId: batch, type: ["BatchSpace", "Space"] });
   const refused = await invoke({ method: "POST", path: `/space/${batch}/import`, body: archive, contentType: "application/x-tar" });
   assert.equal(refused.status, 400);
@@ -1316,7 +1316,7 @@ test("a Space archive carries a governing log, and an import restores it", async
   assert.ok(entries.has(`${dir}.collectionlog.gov.json`));
   const logRecord = JSON.parse(entries.get(`${dir}.collectionlog.gov.json`).toString("utf8"));
   assert.equal(logRecord.body, genesisLine(descriptor(["e1"], "e1")) + "\n");
-  assert.equal(logRecord.originId, "dcc-was-sandbox");
+  assert.equal(logRecord.originId, "dcc-pws-sandbox");
   assert.ok(logRecord.generation && logRecord.updatedAt);
   assert.equal(JSON.parse(entries.get(`${dir}.collection.meta.gov.json`).toString("utf8")).encryption, undefined);
 
@@ -1397,7 +1397,7 @@ test("the consumer positions each record at its latest write, ignores stale even
   fakes.s3.buckets.get(SPACE).delete("meta/notes.json");
   assert.equal((await objectEvent("meta/notes.json", { deleted: true })).outcome, "purged");
   assert.equal(await readCounter(SPACE, "notes"), null);
-  assert.equal([...fakes.dynamo.tables["was-feed"].keys()].filter((k) => k.includes("|notes#")).length, 0);
+  assert.equal([...fakes.dynamo.tables["pws-feed"].keys()].filter((k) => k.includes("|notes#")).length, 0);
 });
 
 test("POST /space/{s}/{c}/query with the changes profile serves the feed in order, resumable by checkpoint, ending in null", async () => {
@@ -1443,7 +1443,7 @@ test("POST /space/{s}/{c}/query with the changes profile serves the feed in orde
   assert.equal(one.epoch, "e1");
   assert.equal(one.writerId, "w1");
   assert.equal(one.createdBy, controllerKey.controller);
-  assert.equal(one.originId, "dcc-was-sandbox");
+  assert.equal(one.originId, "dcc-pws-sandbox");
   assert.ok(one.updatedAt && one.generation && one.checkpoint);
   const blob = all.find((d) => d.id === "blob");
   assert.equal(blob.contentType, "application/octet-stream");
@@ -1514,7 +1514,7 @@ test("the feed carries a governed Collection's log and its service description a
   const core = service.json.specs["https://w3id.org/pws"][0];
   assert.ok(core.features.includes("changes-query"));
   assert.ok(core.features.includes("created-by"));
-  assert.equal(core.originId, "dcc-was-sandbox");
+  assert.equal(core.originId, "dcc-pws-sandbox");
 });
 
 test("the consumer applies a queue batch and reports the records that failed", async () => {
@@ -1612,7 +1612,7 @@ test("with open provisioning a did:key creates a Space by id, within its cap; wi
     assert.deepEqual(created.json.type, ["Space"]);
     assert.equal(created.json.controller, controllerKey.controller);
     assert.ok(fakes.s3.buckets.has(bucketOf(id)));
-    assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${id}`).did.S, controllerKey.controller);
+    assert.equal(fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${id}`).did.S, controllerKey.controller);
     // The Space answers to its controller from then on
     const read = await invoke({ path: `/space/${id}/meta` });
     assert.equal(read.status, 200);
@@ -1748,8 +1748,8 @@ test("a chain holding a revoked capability is refused at any depth", async () =>
 
 // --- the client-annex clause ---------------------------------------------------
 
-const ACCT = "dcc-was-0000aaaa-0000-4000-8000-0000000000ad";
-const ANNEX_SPACE = "dcc-was-0000aaaa-0000-4000-8000-0000000000ae";
+const ACCT = "dcc-pws-0000aaaa-0000-4000-8000-0000000000ad";
+const ANNEX_SPACE = "dcc-pws-0000aaaa-0000-4000-8000-0000000000ae";
 const ACCT_URL = `${BASE}/space/${ACCT}/`;
 const WAS_ACTIONS = ["GET", "HEAD", "POST", "PUT", "DELETE"];
 const ladderKey = await keyFromSeed("ladder-verification-method-0000000");
@@ -1888,7 +1888,7 @@ test("a generation grant to a freshly re-pointed annex is admitted while the cac
 
   // The fresh generation (a second annex DID) and the re-pointing entry, both
   // written to the logs without touching the cache
-  const NEXT_SPACE = "dcc-was-0000aaaa-0000-4000-8000-0000000000af";
+  const NEXT_SPACE = "dcc-pws-0000aaaa-0000-4000-8000-0000000000af";
   const next = await mintAccount({ spaceId: NEXT_SPACE, key: annexKey, transient: transientKey });
   await seedSpace(fakes, { spaceId: NEXT_SPACE, controller: account.did, type: ["AuxiliarySpace", "DelegatedClientsSpace", "Space"] });
   await seedObject(fakes, bucketOf(NEXT_SPACE), "collections/id/did.jsonl", next.jsonl, "text/jsonl");
@@ -1913,7 +1913,7 @@ test("a generation grant to a freshly re-pointed annex is admitted while the cac
   const viaNext = await invoke({ path, signer: asWebvh(annexKey, next.did), capability: second });
   assert.equal(viaNext.status, 200, viaNext.body);
   // A grant to an annex no version of the document names is still refused
-  const OTHER_SPACE = "dcc-was-0000aaaa-0000-4000-8000-0000000000b0";
+  const OTHER_SPACE = "dcc-pws-0000aaaa-0000-4000-8000-0000000000b0";
   const other = await mintAccount({ spaceId: OTHER_SPACE, key: annexKey, transient: transientKey });
   await seedSpace(fakes, { spaceId: OTHER_SPACE, controller: account.did, type: ["AuxiliarySpace", "DelegatedClientsSpace", "Space"] });
   await seedObject(fakes, bucketOf(OTHER_SPACE), "collections/id/did.jsonl", other.jsonl, "text/jsonl");
@@ -1991,7 +1991,7 @@ test("unlock Spaces take slots under the cap; past it they are refused; a delete
     const first = await createUnlockSpace(keys[0]);
     assert.equal(first.status, 201, first.body);
     assert.equal(await readCouponlessCount(), 1);
-    const row = fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${deriveSpaceId(keys[0].controller)}`);
+    const row = fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${deriveSpaceId(keys[0].controller)}`);
     assert.equal(row.provisioning.S, "derived");
     const second = await createUnlockSpace(keys[1]);
     assert.equal(second.status, 201, second.body);
@@ -2015,7 +2015,7 @@ test("unlock Spaces take slots under the cap; past it they are refused; a delete
     });
     assert.equal(withCoupon.status, 201, withCoupon.body);
     assert.equal(withCoupon.json.id, deriveSpaceId(strangerKey.controller));
-    assert.equal(fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${withCoupon.json.id}`).provisioning.S, "coupon");
+    assert.equal(fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${withCoupon.json.id}`).provisioning.S, "coupon");
     assert.equal(await readCouponlessCount(), 2);
     // ... and deleting it changes nothing
     const couponGone = await invoke({ method: "DELETE", path: `/space/${withCoupon.json.id}/` });
@@ -2037,11 +2037,11 @@ test("a whole-registry sweep recounts the coupon-less Spaces and backfills provi
   await seedSpace(fakes, { spaceId: SPACE_B });
   const recorded = "bq0CrK85pRtRxqriiwnrAJg5smqsPaXrVs-EsEWJYTI";
   await seedSpace(fakes, { spaceId: recorded });
-  fakes.dynamo.tables["was-spaces"].get(`${BASE}/space/${recorded}`).provisioning = { S: "coupon" };
+  fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${recorded}`).provisioning = { S: "coupon" };
   const report = await sweep({});
   assert.deepEqual(report.couponlessSpaces, { count: 1, max: 200 });
   assert.equal(await readCouponlessCount(), 1);
-  const rows = fakes.dynamo.tables["was-spaces"];
+  const rows = fakes.dynamo.tables["pws-spaces"];
   assert.equal(rows.get(`${BASE}/space/${legacyUnlock}`).provisioning.S, "derived");
   assert.equal(rows.get(`${BASE}/space/${SPACE}`).provisioning.S, "coupon");
   assert.equal(rows.get(`${BASE}/space/${recorded}`).provisioning.S, "coupon");
@@ -2056,13 +2056,13 @@ test("the fake table refuses a bare reserved word in an expression, as DynamoDB 
   const { ScanCommand, UpdateItemCommand } = createRequire(new URL("../package.json", import.meta.url))("@aws-sdk/client-dynamodb");
   // `provisioning` is reserved: the first live sweep failed on exactly this
   await assert.rejects(
-    fakes.dynamo.send(new ScanCommand({ TableName: "was-spaces", ProjectionExpression: "spaceURL, provisioning" })),
+    fakes.dynamo.send(new ScanCommand({ TableName: "pws-spaces", ProjectionExpression: "spaceURL, provisioning" })),
     { name: "ValidationException", message: /reserved keyword: provisioning/ }
   );
   await assert.rejects(
     fakes.dynamo.send(
       new UpdateItemCommand({
-        TableName: "was-spaces",
+        TableName: "pws-spaces",
         Key: { spaceURL: { S: `${BASE}/space/${SPACE}` } },
         UpdateExpression: "SET provisioning = :kind",
         ExpressionAttributeValues: { ":kind": { S: "coupon" } },
@@ -2072,7 +2072,7 @@ test("the fake table refuses a bare reserved word in an expression, as DynamoDB 
   );
   // Aliased, the same requests go through
   const scanned = await fakes.dynamo.send(
-    new ScanCommand({ TableName: "was-spaces", ProjectionExpression: "spaceURL, #provisioning", ExpressionAttributeNames: { "#provisioning": "provisioning" } })
+    new ScanCommand({ TableName: "pws-spaces", ProjectionExpression: "spaceURL, #provisioning", ExpressionAttributeNames: { "#provisioning": "provisioning" } })
   );
   assert.ok(Array.isArray(scanned.Items));
 });
@@ -2082,8 +2082,8 @@ test("the quota watch publishes the bucket and coupon-less counts", async () => 
   const report = await quotaWatch();
   assert.equal(report.couponlessSpaces, 1);
   assert.equal(report.max, 200);
-  assert.equal(report.buckets, [...fakes.s3.buckets.keys()].filter((name) => name.startsWith("dcc-was-")).length);
+  assert.equal(report.buckets, [...fakes.s3.buckets.keys()].filter((name) => name.startsWith("dcc-pws-")).length);
   const published = Object.fromEntries(fakes.cloudwatch.metrics.map((metric) => [metric.MetricName, metric.Value]));
   assert.deepEqual(published, { SpaceBuckets: report.buckets, CouponlessSpaces: 1 });
-  assert.ok(fakes.cloudwatch.metrics.every((metric) => metric.namespace === "WasServer"));
+  assert.ok(fakes.cloudwatch.metrics.every((metric) => metric.namespace === "PwsServer"));
 });

@@ -178,7 +178,7 @@ export async function seedSpace(fakes, { spaceId, controller = controllerKey.con
     constructor: { name: "PutObjectCommand" },
     input: { Bucket: spaceId, Key: "meta/space.json", Body: JSON.stringify(doc), ContentType: "application/json" },
   });
-  fakes.dynamo.tables["was-spaces"].set(`${BASE}/space/${spaceId}`, {
+  fakes.dynamo.tables["pws-spaces"].set(`${BASE}/space/${spaceId}`, {
     spaceURL: { S: `${BASE}/space/${spaceId}` },
     did: { S: controller },
     type: { L: type.map((entry) => ({ S: entry })) },

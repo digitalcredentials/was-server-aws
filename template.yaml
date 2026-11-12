@@ -59,7 +59,7 @@ Parameters:
     Default: "160"
   SpaceBucketsAlarmThreshold:
     Type: String
-    Description: The number of dcc-was-* buckets at or above which the stack's alarm fires.
+    Description: The number of dcc-pws-* buckets at or above which the stack's alarm fires.
     Default: "300"
   AlertEmail:
     Type: String
@@ -77,13 +77,13 @@ Globals:
       - !Ref WasLibLayer
     Environment:
       Variables:
-        # The spaces registry (WasSpacesTable below).
-        SPACES_TABLE_NAME: !Ref WasSpacesTable
-        COUPONS_TABLE_NAME: was-coupons
+        # The spaces registry (PwsSpacesTable below).
+        SPACES_TABLE_NAME: !Ref PwsSpacesTable
+        COUPONS_TABLE_NAME: pws-coupons
         SPACE_URL_BASE: !Ref SpaceBaseUrl
         ID_DOMAIN: !Ref IdDomain
         INSTANCE_VERSION: '0.5.0'
-        FEED_TABLE_NAME: !Ref WasFeedTable
+        FEED_TABLE_NAME: !Ref PwsFeedTable
         FEED_QUEUE_URL: !Ref FeedQueue
         API_HOST: !Ref ApiDomain
         OPEN_PROVISIONING: !Ref OpenProvisioning
@@ -96,10 +96,10 @@ Resources:
   # (ISO timestamp; absent = never). POST /spaces/ redeems a coupon from here;
   # whoever administers the deployment mints rows (the wallet back end seeds
   # its registration code as an unlimited coupon).
-  WasCouponsTable:
+  PwsCouponsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: was-coupons
+      TableName: pws-coupons
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: coupon
@@ -119,10 +119,10 @@ Resources:
   # Collection. Fed by the Space buckets' object events through EventBridge
   # and a FIFO queue (one message group, so positions are assigned in
   # order), read by the query function through the by-position index.
-  WasFeedTable:
+  PwsFeedTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: was-feed
+      TableName: pws-feed
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: bucket
@@ -151,7 +151,7 @@ Resources:
   FeedDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: was-feed-dead-letters.fifo
+      QueueName: pws-feed-dead-letters.fifo
       FifoQueue: true
       ContentBasedDeduplication: true
       MessageRetentionPeriod: 1209600
@@ -159,7 +159,7 @@ Resources:
   FeedQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: was-feed.fifo
+      QueueName: pws-feed.fifo
       FifoQueue: true
       ContentBasedDeduplication: true
       VisibilityTimeout: 120
@@ -197,7 +197,7 @@ Resources:
         detail:
           bucket:
             name:
-              - prefix: dcc-was-
+              - prefix: dcc-pws-
       Targets:
         - Id: feed-queue
           Arn: !GetAtt FeedQueue.Arn
@@ -212,14 +212,14 @@ Resources:
       Timeout: 60
       Policies:
         - DynamoDBCrudPolicy:
-            TableName: !Ref WasFeedTable
+            TableName: !Ref PwsFeedTable
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/*
+              Resource: arn:aws:s3:::dcc-pws-*/*
       Events:
         Feed:
           Type: SQS
@@ -240,9 +240,9 @@ Resources:
       MemorySize: 512
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref WasFeedTable
+            TableName: !Ref PwsFeedTable
         - DynamoDBReadPolicy:
-            TableName: !Ref WasSpacesTable
+            TableName: !Ref PwsSpacesTable
         - Statement:
             # A whole-registry sweep reconciles the coupon-less counter and
             # backfills `provisioning` on older rows
@@ -250,15 +250,15 @@ Resources:
               Action:
                 - dynamodb:PutItem
                 - dynamodb:UpdateItem
-              Resource: !GetAtt WasSpacesTable.Arn
+              Resource: !GetAtt PwsSpacesTable.Arn
             - Effect: Allow
               Action:
                 - s3:ListBucket
                 - s3:PutBucketNotification
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/*
+              Resource: arn:aws:s3:::dcc-pws-*/*
             - Effect: Allow
               Action: sqs:SendMessage
               Resource: !GetAtt FeedQueue.Arn
@@ -277,7 +277,7 @@ Resources:
       Timeout: 60
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref WasSpacesTable
+            TableName: !Ref PwsSpacesTable
         - Statement:
             - Effect: Allow
               Action: s3:ListAllMyBuckets
@@ -287,7 +287,7 @@ Resources:
               Resource: "*"
               Condition:
                 StringEquals:
-                  cloudwatch:namespace: WasServer
+                  cloudwatch:namespace: PwsServer
       Events:
         Hourly:
           Type: Schedule
@@ -297,7 +297,7 @@ Resources:
   QuotaTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: was-server-quota-alerts
+      TopicName: pws-server-quota-alerts
 
   QuotaEmailSubscription:
     Type: AWS::SNS::Subscription
@@ -310,9 +310,9 @@ Resources:
   CouponlessSpacesAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: was-server-couponless-spaces
+      AlarmName: pws-server-couponless-spaces
       AlarmDescription: Spaces created without a coupon are approaching the cap (MaxCouponlessSpaces).
-      Namespace: WasServer
+      Namespace: PwsServer
       MetricName: CouponlessSpaces
       Statistic: Maximum
       Period: 3600
@@ -326,9 +326,9 @@ Resources:
   SpaceBucketsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: was-server-space-buckets
-      AlarmDescription: The number of dcc-was-* buckets is high.
-      Namespace: WasServer
+      AlarmName: pws-server-space-buckets
+      AlarmDescription: The number of dcc-pws-* buckets is high.
+      Namespace: PwsServer
       MetricName: SpaceBuckets
       Statistic: Maximum
       Period: 3600
@@ -339,10 +339,10 @@ Resources:
       AlarmActions:
         - !Ref QuotaTopic
 
-  WasSpacesTable:
+  PwsSpacesTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: was-spaces
+      TableName: pws-spaces
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: spaceURL
@@ -526,7 +526,7 @@ Resources:
       Timeout: 10
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref WasSpacesTable
+            TableName: !Ref PwsSpacesTable
         - Statement:
             # The DID logs of this deployment's accounts, read from their
             # Spaces' buckets (ListBucket on the one key so a missing log is
@@ -535,7 +535,7 @@ Resources:
             # clause reads a Space's type and controller from.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -545,9 +545,9 @@ Resources:
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*/did.jsonl
-                - arn:aws:s3:::dcc-was-*/revocations/*
-                - arn:aws:s3:::dcc-was-*/meta/space.json
+                - arn:aws:s3:::dcc-pws-*/collections/*/did.jsonl
+                - arn:aws:s3:::dcc-pws-*/revocations/*
+                - arn:aws:s3:::dcc-pws-*/meta/space.json
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -583,11 +583,11 @@ Resources:
       Timeout: 10
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref WasSpacesTable
+            TableName: !Ref PwsSpacesTable
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -597,12 +597,12 @@ Resources:
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*/did.jsonl
-                - arn:aws:s3:::dcc-was-*/revocations/*
-                - arn:aws:s3:::dcc-was-*/meta/space.json
+                - arn:aws:s3:::dcc-pws-*/collections/*/did.jsonl
+                - arn:aws:s3:::dcc-pws-*/revocations/*
+                - arn:aws:s3:::dcc-pws-*/meta/space.json
             - Effect: Allow
               Action: s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/revocations/*
+              Resource: arn:aws:s3:::dcc-pws-*/revocations/*
       Events:
         Revoke:
           Type: HttpApi
@@ -690,23 +690,23 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - DynamoDBWritePolicy:
-            TableName: !Ref WasSpacesTable
+            TableName: !Ref PwsSpacesTable
         - DynamoDBCrudPolicy:
-            TableName: !Ref WasCouponsTable
+            TableName: !Ref PwsCouponsTable
         - Statement:
             # A client-chosen id is checked against the registry before the
             # coupon is spent
             - Effect: Allow
               Action: dynamodb:GetItem
-              Resource: !GetAtt WasSpacesTable.Arn
+              Resource: !GetAtt PwsSpacesTable.Arn
             - Effect: Allow
               Action:
                 - s3:CreateBucket
                 - s3:PutBucketNotification
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/meta/space.json
+              Resource: arn:aws:s3:::dcc-pws-*/meta/space.json
       Events:
         Post:
           Type: HttpApi
@@ -729,7 +729,7 @@ Resources:
       Handler: app.lambdaHandler
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref WasSpacesTable
+            TableName: !Ref PwsSpacesTable
       Events:
         Get:
           Type: HttpApi
@@ -770,12 +770,12 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/meta/*
-                - arn:aws:s3:::dcc-was-*/policies/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Get:
           Type: HttpApi
@@ -800,12 +800,12 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/meta/*
+              Resource: arn:aws:s3:::dcc-pws-*/meta/*
       Events:
         Post:
           Type: HttpApi
@@ -832,20 +832,20 @@ Resources:
                 - dynamodb:GetItem
                 - dynamodb:DeleteItem
                 - dynamodb:UpdateItem
-              Resource: !GetAtt WasSpacesTable.Arn
+              Resource: !GetAtt PwsSpacesTable.Arn
             - Effect: Allow
               Action:
                 - dynamodb:Query
                 - dynamodb:DeleteItem
-              Resource: !GetAtt WasFeedTable.Arn
+              Resource: !GetAtt PwsFeedTable.Arn
             - Effect: Allow
               Action:
                 - s3:ListBucket
                 - s3:DeleteBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:DeleteObject
-              Resource: arn:aws:s3:::dcc-was-*/*
+              Resource: arn:aws:s3:::dcc-pws-*/*
       Events:
         Delete:
           Type: HttpApi
@@ -867,7 +867,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -877,8 +877,8 @@ Resources:
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/meta/space.json
-                - arn:aws:s3:::dcc-was-*/policies/space.json
+                - arn:aws:s3:::dcc-pws-*/meta/space.json
+                - arn:aws:s3:::dcc-pws-*/policies/space.json
       Events:
         Get:
           Type: HttpApi
@@ -909,7 +909,7 @@ Resources:
             # promotion resolves).
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -922,26 +922,26 @@ Resources:
               Action:
                 - dynamodb:UpdateItem
                 - dynamodb:PutItem
-              Resource: !GetAtt WasSpacesTable.Arn
+              Resource: !GetAtt PwsSpacesTable.Arn
             # The per-controller cap of open provisioning counts by DID
             - Effect: Allow
               Action: dynamodb:Query
-              Resource: !Sub "${WasSpacesTable.Arn}/index/by-did"
+              Resource: !Sub "${PwsSpacesTable.Arn}/index/by-did"
             - Effect: Allow
               Action:
                 - s3:CreateBucket
                 - s3:PutBucketNotification
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/meta/space.json
+              Resource: arn:aws:s3:::dcc-pws-*/meta/space.json
             # A promotion resolves the did:webvh's log, in `id` or, for the
             # self-hosted form, in the Collection the DID names
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/collections/*/did.jsonl
+              Resource: arn:aws:s3:::dcc-pws-*/collections/*/did.jsonl
       Events:
         Put:
           Type: HttpApi
@@ -982,13 +982,13 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*
-                - arn:aws:s3:::dcc-was-*/meta/*
-                - arn:aws:s3:::dcc-was-*/policies/*
+                - arn:aws:s3:::dcc-pws-*/collections/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Export:
           Type: HttpApi
@@ -1025,24 +1025,24 @@ Resources:
       Timeout: 60
       Environment:
         Variables:
-          SPACES_TABLE_NAME: !Ref WasSpacesTable
+          SPACES_TABLE_NAME: !Ref PwsSpacesTable
       Policies:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action:
                 - s3:GetObject
                 - s3:PutObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*
-                - arn:aws:s3:::dcc-was-*/meta/*
-                - arn:aws:s3:::dcc-was-*/policies/*
+                - arn:aws:s3:::dcc-pws-*/collections/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/policies/*
             # The restored name is mirrored to the registry, as Update Space does
             - Effect: Allow
               Action: dynamodb:UpdateItem
-              Resource: !GetAtt WasSpacesTable.Arn
+              Resource: !GetAtt PwsSpacesTable.Arn
       Events:
         Import:
           Type: HttpApi
@@ -1080,7 +1080,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1088,7 +1088,7 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/space.json
+              Resource: arn:aws:s3:::dcc-pws-*/policies/space.json
       Events:
         Get:
           Type: HttpApi
@@ -1109,7 +1109,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1119,7 +1119,7 @@ Resources:
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/space.json
+              Resource: arn:aws:s3:::dcc-pws-*/policies/space.json
       Events:
         Put:
           Type: HttpApi
@@ -1140,7 +1140,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1150,7 +1150,7 @@ Resources:
               Action:
                 - s3:GetObject
                 - s3:DeleteObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/space.json
+              Resource: arn:aws:s3:::dcc-pws-*/policies/space.json
       Events:
         Delete:
           Type: HttpApi
@@ -1171,13 +1171,13 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*
-                - arn:aws:s3:::dcc-was-*/meta/*
-                - arn:aws:s3:::dcc-was-*/policies/*
+                - arn:aws:s3:::dcc-pws-*/collections/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Get:
           Type: HttpApi
@@ -1206,7 +1206,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1218,8 +1218,8 @@ Resources:
                 - s3:GetObject
                 - s3:PutObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*
-                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/collections/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
       Events:
         Post:
           Type: HttpApi
@@ -1241,7 +1241,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1253,8 +1253,8 @@ Resources:
                 - s3:GetObject
                 - s3:PutObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*
-                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/collections/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
       Events:
         Put:
           Type: HttpApi
@@ -1275,18 +1275,18 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*
-                - arn:aws:s3:::dcc-was-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/collections/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
             - Effect: Allow
               Action: s3:DeleteObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*
-                - arn:aws:s3:::dcc-was-*/meta/*
-                - arn:aws:s3:::dcc-was-*/policies/*
+                - arn:aws:s3:::dcc-pws-*/collections/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Delete:
           Type: HttpApi
@@ -1306,12 +1306,12 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/meta/*
-                - arn:aws:s3:::dcc-was-*/policies/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Get:
           Type: HttpApi
@@ -1335,12 +1335,12 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/meta/*
+              Resource: arn:aws:s3:::dcc-pws-*/meta/*
       Events:
         Put:
           Type: HttpApi
@@ -1360,12 +1360,12 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/meta/*
-                - arn:aws:s3:::dcc-was-*/policies/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Get:
           Type: HttpApi
@@ -1389,12 +1389,12 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/meta/*
+              Resource: arn:aws:s3:::dcc-pws-*/meta/*
       Events:
         Put:
           Type: HttpApi
@@ -1413,14 +1413,14 @@ Resources:
       Timeout: 30
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref WasFeedTable
+            TableName: !Ref PwsFeedTable
         - Statement:
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/*
+              Resource: arn:aws:s3:::dcc-pws-*/*
       Events:
         Post:
           Type: HttpApi
@@ -1448,7 +1448,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1456,7 +1456,7 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/*
+              Resource: arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Get:
           Type: HttpApi
@@ -1477,7 +1477,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1487,7 +1487,7 @@ Resources:
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/*
+              Resource: arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Put:
           Type: HttpApi
@@ -1508,7 +1508,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1518,7 +1518,7 @@ Resources:
               Action:
                 - s3:GetObject
                 - s3:DeleteObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/*
+              Resource: arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Delete:
           Type: HttpApi
@@ -1541,7 +1541,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1552,9 +1552,9 @@ Resources:
             - Effect: Allow
               Action: s3:GetObject
               Resource:
-                - arn:aws:s3:::dcc-was-*/collections/*
-                - arn:aws:s3:::dcc-was-*/meta/*
-                - arn:aws:s3:::dcc-was-*/policies/*
+                - arn:aws:s3:::dcc-pws-*/collections/*
+                - arn:aws:s3:::dcc-pws-*/meta/*
+                - arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Get:
           Type: HttpApi
@@ -1581,7 +1581,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1590,12 +1590,12 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/collections/*
+              Resource: arn:aws:s3:::dcc-pws-*/collections/*
             - Effect: Allow
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/meta/*
+              Resource: arn:aws:s3:::dcc-pws-*/meta/*
       Events:
         Put:
           Type: HttpApi
@@ -1617,7 +1617,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1625,7 +1625,7 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: s3:GetObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/*
+              Resource: arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Get:
           Type: HttpApi
@@ -1646,7 +1646,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1656,7 +1656,7 @@ Resources:
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/*
+              Resource: arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Put:
           Type: HttpApi
@@ -1677,7 +1677,7 @@ Resources:
             # function's own keys.
             - Effect: Allow
               Action: s3:ListBucket
-              Resource: arn:aws:s3:::dcc-was-*
+              Resource: arn:aws:s3:::dcc-pws-*
               Condition:
                 StringLike:
                   s3:prefix:
@@ -1687,7 +1687,7 @@ Resources:
               Action:
                 - s3:GetObject
                 - s3:DeleteObject
-              Resource: arn:aws:s3:::dcc-was-*/policies/*
+              Resource: arn:aws:s3:::dcc-pws-*/policies/*
       Events:
         Delete:
           Type: HttpApi

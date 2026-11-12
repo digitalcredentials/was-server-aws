@@ -4,7 +4,7 @@ import { DynamoDBClient, GetItemCommand } from "@aws-sdk/client-dynamodb";
 // controller DID and type array, by Space URL.
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
 
 export async function getSpace(spaceUrl) {
   const { Item } = await dynamo.send(new GetItemCommand({ TableName: SPACES_TABLE, Key: { spaceURL: { S: spaceUrl } } }));

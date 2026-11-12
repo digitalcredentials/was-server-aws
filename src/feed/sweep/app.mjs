@@ -15,7 +15,7 @@ import { isCounterRow, isCouponlessRow, maxCouponlessSpaces, provisioningOf, set
 // lacks. Invoked by hand or on a schedule with `{ "buckets": [...] }`, or
 // with no input for every registered Space.
 
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
 const QUEUE_URL = process.env.FEED_QUEUE_URL;
 const s3 = new S3Client({});
 const sqs = new SQSClient({});

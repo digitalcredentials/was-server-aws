@@ -13,7 +13,7 @@ import { HttpProblem, idConflict, invalidId, invalidRequestBody, notFound, reser
 // authorized by the `controller` DID in the body: the authorizer verified
 // the invocation against the DID that signed it, and that DID must be the
 // stated controller. This server additionally requires a coupon. The id is
-// server-assigned (`dcc-was-{uuid}`, also the bucket name) unless the body
+// server-assigned (`dcc-pws-{uuid}`, also the bucket name) unless the body
 // names one: a wallet built on wallet-core mints its account Space's id
 // before genesis, redeems the coupon here with that id, and genesis then
 // finds the Space in place (its provisioning step is an ensure). A client
@@ -21,14 +21,14 @@ import { HttpProblem, idConflict, invalidId, invalidRequestBody, notFound, reser
 // conflict. The bucket is created with its metadata object and the Space
 // registered.
 //
-// The registry row (the was-spaces table, keyed by space URL without a
+// The registry row (the pws-spaces table, keyed by space URL without a
 // trailing slash, with a by-did index) holds authorization and lookup data
 // only: the controller DID, the type array, the name (mirrored for
 // listings) and the creation time.
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "was-spaces";
-const COUPONS_TABLE = process.env.COUPONS_TABLE_NAME ?? "was-coupons";
+const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
+const COUPONS_TABLE = process.env.COUPONS_TABLE_NAME ?? "pws-coupons";
 const SPACE_URL_BASE = (process.env.SPACE_URL_BASE ?? "https://was.example.org/space").replace(/\/+$/, "");
 
 const couponRequired = () =>
@@ -114,7 +114,7 @@ async function isRegistered(url) {
 // server-assigned one.
 async function chooseSpaceId(id) {
   if (id === undefined) {
-    return { spaceId: `dcc-was-${randomUUID()}`, chosen: false };
+    return { spaceId: `dcc-pws-${randomUUID()}`, chosen: false };
   }
   if (typeof id !== "string" || !isValidSpaceId(id)) {
     throw invalidId("A Space id must be a server-assigned id or 43 URL-safe characters.");
