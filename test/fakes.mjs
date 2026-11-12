@@ -262,7 +262,7 @@ function assertNoReservedWords(input) {
 }
 
 export class FakeDynamo {
-  tables = { "was-spaces": new Map(), "was-coupons": new Map(), "was-feed": new Map() };
+  tables = { "pws-spaces": new Map(), "pws-coupons": new Map(), "pws-feed": new Map() };
 
   // The feed table's rows, keyed by bucket and record; the by-position
   // index is a sort over them.
@@ -270,7 +270,7 @@ export class FakeDynamo {
 
   async feed(command) {
     const input = command.input;
-    const table = this.tables["was-feed"];
+    const table = this.tables["pws-feed"];
     const values = input.ExpressionAttributeValues ?? {};
     const names = input.ExpressionAttributeNames ?? {};
     const attr = (token) => names[token] ?? token;
@@ -352,7 +352,7 @@ export class FakeDynamo {
   async send(command) {
     const input = command.input;
     assertNoReservedWords(input);
-    if (input.TableName === "was-feed") {
+    if (input.TableName === "pws-feed") {
       return this.feed(command);
     }
     switch (command.constructor.name) {

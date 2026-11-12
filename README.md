@@ -73,11 +73,11 @@ built on a base server URL (pws-client 0.105+, FreeWallet) reads
 authorized by the `controller` DID named in the body: the authorizer
 verifies the invocation against the DID that signed it, and the function
 requires that DID to be the stated controller. This server adds a `coupon`,
-redeemed from the `was-coupons` table (optional `usesRemaining` and
+redeemed from the `pws-coupons` table (optional `usesRemaining` and
 `expiresAt`; an unknown, spent or expired coupon is a `403`). `type` is the
 Space's type array (default `["Space"]`; the wallet marks batch spaces
 `["Space", "BatchSpace"]`); `name` is kept in the Space Metadata and mirrored
-to the registry for listings. The server assigns the id (`dcc-was-{uuid}`,
+to the registry for listings. The server assigns the id (`dcc-pws-{uuid}`,
 also the bucket name) unless the body names one: a wallet built on
 wallet-core mints its account Space's id before genesis (43 URL-safe
 characters), redeems the coupon here with that `id`, and genesis then finds
@@ -88,7 +88,7 @@ its bucket is `bucketOf(id)`. Either way the server creates the bucket with
 and the metadata. Mint coupons directly:
 
 ```sh
-aws dynamodb put-item --table-name was-coupons --item \
+aws dynamodb put-item --table-name pws-coupons --item \
   '{"coupon":{"S":"<secret>"},"usesRemaining":{"N":"5"},"expiresAt":{"S":"2027-01-01T00:00:00Z"}}'
 ```
 
@@ -163,17 +163,17 @@ What bounds it:
 
 - `MaxCouponlessSpaces` (default 200) caps how many Spaces created without
   a coupon may exist. A counter row in the registry table
-  (`urn:was-server-aws:couponless-spaces`) is reserved with a conditional
+  (`urn:pws-server:couponless-spaces`) is reserved with a conditional
   increment before such a bucket is created and released when such a Space
   is deleted; past the cap the creation is `507 quota-exceeded`. Each
   registry row records `provisioning` (`coupon`, `derived`, `open`).
 - `QuotaWatchFn` runs hourly (and by hand: `aws lambda invoke
   --function-name <stack>-QuotaWatchFn-... --payload '{}' out.json`),
-  publishing `WasServer/CouponlessSpaces` and `WasServer/SpaceBuckets`.
-  The alarms `was-server-couponless-spaces` (threshold
-  `CouponlessAlarmThreshold`, default 160) and `was-server-space-buckets`
+  publishing `PwsServer/CouponlessSpaces` and `PwsServer/SpaceBuckets`.
+  The alarms `pws-server-couponless-spaces` (threshold
+  `CouponlessAlarmThreshold`, default 160) and `pws-server-space-buckets`
   (`SpaceBucketsAlarmThreshold`, default 300) notify the SNS topic
-  `was-server-quota-alerts`; deploy with `AlertEmail=<address>` to
+  `pws-server-quota-alerts`; deploy with `AlertEmail=<address>` to
   subscribe an address (confirm the subscription email). Check them with
   `aws cloudwatch describe-alarms --alarm-name-prefix was-server`.
 - A whole-registry feed sweep (`FeedSweepFn` with `{}`) recounts the
@@ -249,13 +249,13 @@ Collection was deleted and re-created) is refused with
 other profile is `unsupported-operation` (501). A query needs read
 authorization: a capability covering the Collection, or a `PublicCanRead`
 policy. Advertised as `changes-query`; the core entry also carries the
-store's `originId` (`ORIGIN_ID`, default `dcc-was-sandbox`).
+store's `originId` (`ORIGIN_ID`, default `dcc-pws-sandbox`).
 
 S3 stays the system of record. The feed is a DynamoDB projection
-(`was-feed`: one row per record, keyed by bucket and
+(`pws-feed`: one row per record, keyed by bucket and
 `{collection}#{kind}#{record}`, with a per-Collection counter row and a
 `by-position` index) kept by a pipeline the buckets' object events drive:
-every Space bucket publishes to EventBridge, a rule routes the `dcc-was-*`
+every Space bucket publishes to EventBridge, a rule routes the `dcc-pws-*`
 events to a FIFO queue in one message group, and `FeedConsumerFn`
 (`src/feed/consumer`) applies them in order, taking the next position from
 the counter and writing the record's row (a stale event by S3 sequencer, or
@@ -330,7 +330,7 @@ Two operations exist for a wallet to move an account onto a `did:webvh`
   SHA-256), the body names that `did:key` as `controller`, and its `type`
   carries `UnlockSpace`. The id is bound to the key, so nothing else can be
   claimed. Such an id is not a valid bucket name, so `bucketOf` in
-  `store.mjs` maps it to `dcc-was-` plus 40 hex characters of its SHA-256;
+  `store.mjs` maps it to `dcc-pws-` plus 40 hex characters of its SHA-256;
   server-assigned ids are their own bucket names.
 
 ### Revoking a capability
@@ -526,7 +526,7 @@ s3://{space_id}/
         └── {resource_id}         Resource content
 ```
 
-The registry (`was-spaces`, the `WasSpacesTable` of this stack) has one row
+The registry (`pws-spaces`, the `PwsSpacesTable` of this stack) has one row
 per Space: `spaceURL` (no trailing slash), `did`, `type` (a list), `name`,
 `CreatedAt`, with a `by-did` index for the listing. The authorizer reads it
 on every request and the Space functions write it. lcw-back-end's
