@@ -32,9 +32,12 @@ import {
 //
 // The archive is built in memory and answered as one response body. API
 // Gateway carries at most 6 MB of response after base64 encoding, so an
-// archive beyond ARCHIVE_LIMIT is refused with 413 rather than cut off.
-// Nothing is written: the operation is safe, carried over POST because it
-// is capability-invoked.
+// archive beyond ARCHIVE_LIMIT is refused with 413 rather than cut off:
+// every file is counted as it is gathered (content, metadata, policies and
+// the governing logs, which grow with a Space's key rotations and can
+// outweigh its content), and the packed archive is checked once more, tar
+// headers included. Nothing is written: the operation is safe, carried
+// over POST because it is capability-invoked.
 
 const ARCHIVE_LIMIT = 4 * 1024 * 1024;
 
@@ -76,7 +79,14 @@ async function collectionEntry(req, spaceId, collectionId, budget) {
   // The stored metadata object: on a governed Collection the derived
   // members stay out, and the governing log travels as its own file
   const { encryption: _encryption, revisions: _revisions, ...metadata } = stored(meta.doc);
-  const files = [{ name: collectionMetadataFileName(collectionId), bytes: bytesOf(meta.governed ? metadata : stored(meta.doc)) }];
+  // Every file counts against the budget, the governing log included: a
+  // Space's logs grow with its key rotations and can outweigh its content
+  const files = [];
+  const add = (name, bytes) => {
+    budget.spend(bytes.length);
+    files.push({ name, bytes });
+  };
+  add(collectionMetadataFileName(collectionId), bytesOf(meta.governed ? metadata : stored(meta.doc)));
   // The archive format's log entry: a JSON object whose `body` is the log's
   // JSON Lines text, beside the record's write stamp and generation (this
   // server's stamp is the object's last-modified time; its generation the
@@ -90,11 +100,11 @@ async function collectionEntry(req, spaceId, collectionId, budget) {
       updatedAtCounter: 0,
       originId: originId(),
     };
-    files.push({ name: collectionLogFileName(collectionId), bytes: bytesOf(record) });
+    add(collectionLogFileName(collectionId), bytesOf(record));
   }
   const policy = await getJson(spaceId, KEYS.collectionPolicy(collectionId));
   if (policy) {
-    files.push({ name: COLLECTION_POLICY_FILE_NAME, bytes: bytesOf(policy.doc) });
+    add(COLLECTION_POLICY_FILE_NAME, bytesOf(policy.doc));
   }
   const prefix = KEYS.collectionPrefix(collectionId);
   const keys = (await listAllKeys(spaceId, prefix)).filter((key) => key.length > prefix.length).sort();
@@ -104,14 +114,13 @@ async function collectionEntry(req, spaceId, collectionId, budget) {
     if (object === null) {
       continue;
     }
-    budget.spend(object.body.length);
     const contentType = object.contentType ?? "application/octet-stream";
-    files.push({ name: fileNameFor({ resourceId, contentType }), bytes: object.body });
+    add(fileNameFor({ resourceId, contentType }), object.body);
     const annotation = await getJson(spaceId, KEYS.resourceMeta(collectionId, resourceId));
-    files.push({ name: metaSidecarFileName(resourceId), bytes: bytesOf(resourceMetaDoc({ head: object, stored: annotation })) });
+    add(metaSidecarFileName(resourceId), bytesOf(resourceMetaDoc({ head: object, stored: annotation })));
     const resourcePolicy = await getJson(spaceId, KEYS.resourcePolicy(collectionId, resourceId));
     if (resourcePolicy) {
-      files.push({ name: resourcePolicyFileName(resourceId), bytes: bytesOf(resourcePolicy.doc) });
+      add(resourcePolicyFileName(resourceId), bytesOf(resourcePolicy.doc));
     }
   }
   return { name: collectionId, files };
@@ -123,19 +132,24 @@ export const lambdaHandler = handler(
     if (space === null) {
       throw notFound();
     }
+    const tooLarge = () => payloadTooLarge(`This Space's archive exceeds the ${ARCHIVE_LIMIT} bytes one export response can carry.`);
     let total = 0;
     const budget = {
       spend(bytes) {
         total += bytes;
         if (total > ARCHIVE_LIMIT) {
-          throw payloadTooLarge(`This Space's archive exceeds the ${ARCHIVE_LIMIT} bytes one export response can carry.`);
+          throw tooLarge();
         }
       },
     };
-    const entries = [{ name: spaceMetadataFileName(spaceId), bytes: bytesOf({ ...space.doc, id: spaceId }) }];
+    const spaceMeta = bytesOf({ ...space.doc, id: spaceId });
+    budget.spend(spaceMeta.length);
+    const entries = [{ name: spaceMetadataFileName(spaceId), bytes: spaceMeta }];
     const policy = await getJson(spaceId, KEYS.spacePolicy());
     if (policy) {
-      entries.push({ name: SPACE_POLICY_FILE_NAME, bytes: bytesOf(policy.doc) });
+      const policyBytes = bytesOf(policy.doc);
+      budget.spend(policyBytes.length);
+      entries.push({ name: SPACE_POLICY_FILE_NAME, bytes: policyBytes });
     }
     for (const collectionId of await collectionIds(spaceId)) {
       const entry = await collectionEntry(req, spaceId, collectionId, budget);
@@ -145,6 +159,9 @@ export const lambdaHandler = handler(
     }
     const pack = await packSpaceArchive({ spaceId, entries, service: serviceDescription(req) });
     const archive = Buffer.from(await collectBytes(pack));
+    if (archive.length > ARCHIVE_LIMIT) {
+      throw tooLarge();
+    }
     return respond(req, { status: 200, body: archive, contentType: "application/x-tar" });
   },
   { scope: "space-export", safe: true }
