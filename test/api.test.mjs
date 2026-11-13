@@ -1083,6 +1083,17 @@ test("export needs a capability: unsigned and strangers get 404, a delegated POS
   assert.equal(delegated.status, 200, delegated.body);
 });
 
+test("an export whose metadata and policies, not its content, exceed the limit is refused with 413", async () => {
+  await invoke({ method: "PUT", path: `/space/${SPACE}/notes/one`, json: { v: 1 } });
+  // A resource policy the size of the whole budget: every archived file
+  // counts, not the content alone (a Space's governing logs grow with its
+  // key rotations and can outweigh its content the same way)
+  await seedObject(fakes, SPACE, "policies/notes/one.json", JSON.stringify({ id: "big", padding: "x".repeat(4 * 1024 * 1024) }));
+  const res = await invoke({ method: "POST", path: `/space/${SPACE}/export` });
+  assert.equal(res.status, 413, res.body);
+  assert.equal(res.json.type, "https://w3id.org/pws#payload-too-large");
+});
+
 test("POST /space/{s}/import merges an archive, skips what is held, and reports counts", async () => {
   await seedExportable(SPACE);
   const exported = await invoke({ method: "POST", path: `/space/${SPACE}/export` });

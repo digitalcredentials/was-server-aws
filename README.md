@@ -128,7 +128,12 @@ Space Metadata was `restored` or `skipped`, and lists every attested object as
 
 The archive is built in memory and returned as one response. API Gateway
 carries at most 6 MB after base64 encoding, so an archive over 4 MB is refused
-with `413 payload-too-large`; larger Spaces will need a presigned-URL
+with `413 payload-too-large`. Every archived file counts toward that limit,
+the governing history logs included: each key rotation appends an entry
+carrying the whole descriptor to the user-key roster log and to every
+encrypted collection's log, so a Space that rotates often outgrows the
+limit on logs alone (a dozen rotations took one wallet account to 7 MB of
+logs beside 30 KB of content). Larger Spaces will need a presigned-URL
 hand-off.
 
 ### Provisioning a Space by id
