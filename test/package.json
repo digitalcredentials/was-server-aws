@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node --test api.test.mjs",
+    "test": "node --test api.test.mjs webvh.test.mjs",
     "live": "node live.mjs"
   },
   "dependencies": {
