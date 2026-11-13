@@ -290,9 +290,15 @@ under `capabilityInvocation` (or `capabilityDelegation`, for a delegation's
 proof) in the current document, whose `controller` is then the invoker the
 root capability is checked against. Revoking a key is one log entry. The
 resolved document is cached for `WEBVH_CACHE_SECONDS` (default 30), which
-is the window a revoked key keeps working. A key the cached document does
-not list, and a ladder delegation the clause refuses against it, are each
-judged once more against a fresh resolution before the refusal stands: a
+is the window a revoked key keeps working; past that it is validated
+rather than discarded: the log is read conditionally against the ETag the
+document came from (`If-None-Match`, on the bucket read or the HTTPS
+fetch), and an unchanged log keeps the document, and the walk of the log
+it cost, for another lifetime, so a log that grows with every client and
+credential is downloaded and walked again only when it changed. A key the
+cached document does not list, and a ladder delegation the clause refuses
+against it, are each judged once more against a fresh resolution (the same
+conditional read: an unchanged log lists no new key) before the refusal stands: a
 credential added a moment ago works at once, and so does the generation a
 transient recovery has just re-pointed the account's client-annex entry to.
 
