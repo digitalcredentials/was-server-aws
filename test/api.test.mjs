@@ -50,6 +50,10 @@ test("GET / serves the service description with the service link", async () => {
   // The one read that may be cached without revalidation: the description
   // sets its own short lifetime instead of the no-cache every other read gets
   assert.equal(res.headers["cache-control"], "public, max-age=300");
+  // Every response carries the isolation pair: stored content is data, never
+  // a page of the storage origin
+  assert.equal(res.headers["x-content-type-options"], "nosniff");
+  assert.equal(res.headers["content-security-policy"], "sandbox; default-src 'none'; frame-ancestors 'none'");
   assert.equal(res.json.url, `${BASE}/service`);
   const entry = res.json.specs["https://w3id.org/pws"][0];
   assert.equal(entry.version, "0.5");
@@ -81,6 +85,9 @@ test("an unknown path below a resource is a problem+json 404 that still carries 
   assert.equal(res.headers["content-type"], PROBLEM);
   assert.equal(res.json.type, "https://w3id.org/pws#not-found");
   assert.ok(res.headers.link);
+  // Problem responses carry the isolation pair too
+  assert.equal(res.headers["x-content-type-options"], "nosniff");
+  assert.equal(res.headers["content-security-policy"], "sandbox; default-src 'none'; frame-ancestors 'none'");
   // Outside every route the gateway answers its own 404.
   const outside = await invoke({ path: "/nothing/here", signer: null });
   assert.equal(outside.status, 404);
@@ -234,6 +241,7 @@ test("GET /space/{s}/meta returns the Space Metadata with an ETag", async () => 
   assert.equal(res.status, 200);
   assert.ok(res.headers.etag);
   assert.equal(res.headers["cache-control"], "no-cache");
+  assert.equal(res.headers["content-security-policy"], "sandbox; default-src 'none'; frame-ancestors 'none'");
   assert.equal(res.json.id, SPACE);
   assert.equal(res.json.url, SPACE_URL);
   assert.equal(res.json.controller, controllerKey.controller);
@@ -252,6 +260,7 @@ test("PUT /space/{s}/meta renames the Space under If-Match and mirrors the name 
   assert.equal(res.json.name, "Renamed");
   assert.ok(res.headers.etag && res.headers.etag !== current.headers.etag);
   assert.equal(res.headers["cache-control"], "no-store");
+  assert.equal(res.headers["x-content-type-options"], "nosniff");
   assert.equal(fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${SPACE}`).name.S, "Renamed");
 
   const stale = await invoke({

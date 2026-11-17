@@ -431,6 +431,16 @@ generation delegation into such a tail.
   description, which sets a short `max-age` of its own, is the exception),
   so a browser revalidates a cached read instead of applying heuristic
   freshness to a document that may have been rewritten since.
+- Every response also carries `X-Content-Type-Options: nosniff` and
+  `Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'`:
+  stored content is served as data and never acts as a page of the storage
+  origin. A navigated-to Resource gets an opaque origin and runs no script,
+  so a public `text/html` Resource cannot call WebAuthn — on a deployment
+  whose wallet shares the registrable domain (wallet `lcw-sandbox.org`,
+  storage `was.lcw-sandbox.org`), such a page could otherwise claim the
+  wallet's RP ID and ask a visitor for its passkeys — nor load subresources,
+  nor be framed. Clients reading through `fetch()` are unaffected, and the
+  identity distribution serves API responses, so it carries the same pair.
 - `If-Match` and `If-None-Match: *` are honored on every write and delete
   through S3's conditional operations, so the precondition is atomic with
   the write; failure is `412`. Metadata objects are versioned by their own
