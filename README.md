@@ -1,5 +1,10 @@
 # Wallet Attached Storage (WAS) server
 
+> [!IMPORTANT]
+> **Alpha.** This is part of the Learner Credential Wallet alpha, an early test
+> version. It may change without notice. We read issues, but may not answer or
+> fix them during the alpha.
+
 An implementation of the [W3C CCG Wallet Attached Storage specification](https://w3c-ccg.github.io/wallet-attached-storage-spec/)
 v0.5 on AWS: one Lambda function per endpoint behind an API Gateway HTTP
 API, a gateway authorizer that verifies capability invocations, a layer of
@@ -701,3 +706,7 @@ response deliberately says only `404`.
 - [WAS specification](https://w3c-ccg.github.io/wallet-attached-storage-spec/)
 - [@interop/was-client](https://github.com/interop-alliance/was-client)
 - [AWS SAM developer guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html)
+
+## License
+
+MIT. See [LICENSE](LICENSE).

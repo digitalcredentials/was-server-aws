@@ -1,6 +1,7 @@
 {
   "name": "was-api-tests",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "In-process tests for the WAS API and a live conformance check",
   "type": "module",
   "private": true,
