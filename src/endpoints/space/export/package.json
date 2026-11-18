@@ -1,6 +1,7 @@
 {
   "name": "was-space-export",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "POST /space/{s}/export: the Space as a Space archive",
   "type": "module",
   "engines": {

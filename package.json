@@ -1,6 +1,7 @@
 {
   "name": "was-server-aws",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "Wallet Attached Storage server on AWS SAM",
   "private": true,
   "type": "module",

@@ -1,6 +1,7 @@
 {
   "name": "was-space-import",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "POST /space/{s}/import: merge a Space archive into an existing Space",
   "type": "module",
   "engines": {

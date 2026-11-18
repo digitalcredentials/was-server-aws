@@ -1,6 +1,7 @@
 {
   "name": "was-zcap-authorizer",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "API Gateway REQUEST authorizer that verifies zCap invocations and reports the result in the request context, and the revocation endpoint beside it",
   "type": "module",
   "engines": {

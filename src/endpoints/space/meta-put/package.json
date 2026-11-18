@@ -1,6 +1,7 @@
 {
   "name": "was-space-meta-put",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "PUT /space/{s}/meta: replace Space Metadata, provision an unlock Space, promote a controller to a did:webvh",
   "type": "module",
   "engines": {

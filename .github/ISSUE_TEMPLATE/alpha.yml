@@ -1,0 +1,28 @@
+name: Report a problem
+description: Tell us about something that went wrong in the alpha.
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        This is alpha software. Thank you for reporting. We read every issue,
+        but may not answer or fix it during the alpha.
+  - type: textarea
+    id: what-you-did
+    attributes:
+      label: What you did
+      description: The steps you took, in order.
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw. Include any error message.
+    validations:
+      required: true
+  - type: textarea
+    id: what-you-expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
