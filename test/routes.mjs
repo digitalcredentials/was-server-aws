@@ -24,6 +24,7 @@ export const routes = [
   { methods: ["PUT"], path: `${S}/meta`, fn: "space/meta-put" },
   { methods: ["POST"], path: `${S}/export`, fn: "space/export" },
   { methods: ["POST"], path: `${S}/import`, fn: "space/import" },
+  { methods: ["POST"], path: `${S}/spaces`, fn: "space/spaces-post" },
   { methods: ["GET", "HEAD"], path: `${S}/policy`, fn: "space/policy-get" },
   { methods: ["PUT"], path: `${S}/policy`, fn: "space/policy-put" },
   { methods: ["DELETE"], path: `${S}/policy`, fn: "space/policy-delete" },

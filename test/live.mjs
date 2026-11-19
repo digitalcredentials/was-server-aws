@@ -3,7 +3,8 @@
 // what the wallet can rely on. Creates a scratch Space with a coupon,
 // exercises discovery, Space and Collection metadata, encrypted and
 // plaintext resources, listings, resource metadata, policies and public
-// reads, then deletes the Space.
+// reads, creates Spaces under the scratch Space (an account Space, since a
+// coupon was spent on it), then deletes what it created.
 //
 //   WAS_URL=https://was.lcw-sandbox.org COUPON=... node live.mjs
 //
@@ -82,6 +83,9 @@ const space = was.space(spaceId);
 // Whichever client controls the scratch Space at teardown (the promotion
 // below moves control to the did:webvh client).
 let owner = space;
+// The Spaces created under the scratch Space, deleted at teardown whatever
+// happened in between
+const createdUnder = [];
 
 try {
   // --- space metadata ---------------------------------------------------------
@@ -150,6 +154,43 @@ try {
   check("the revoked grant no longer reads, and its holder is told so", afterRevocation.status === 404 && afterRevocation.type === "https://w3id.org/pws#capability-revoked", `${afterRevocation.status} ${afterRevocation.type}`);
   const again = await outcomeOf(zcapClient.request({ url: revocationUrl, method: "POST", action: "POST", json: grant }));
   check("revoking it again is a 400 capability-already-revoked", again.status === 400 && again.type === "https://w3id.org/pws#capability-already-revoked", `${again.status} ${again.type}`);
+
+  // --- Spaces under the account: a coupon was spent on the scratch Space,
+  // so it is an account Space, and further Spaces are created under it with
+  // a capability on it and no coupon -------------------------------------
+  const accountSpacesUrl = `${WAS}/space/${spaceId}/spaces`;
+  const ACCOUNT_REQUIRED = "https://github.com/digitalcredentials/was-server-aws#account-required";
+  const under = await zcapClient.request({ url: accountSpacesUrl, method: "POST", action: "POST", json: { controller: edKey.controller, name: "live check (under the account)", type: ["Space"] } });
+  check("POST /space/{account}/spaces creates a Space with no coupon", under.status === 201 && Boolean(under.headers.get("location")), under.status);
+  createdUnder.push(was.space(under.data.id));
+  check("the new Space is its controller's", (await was.space(under.data.id).describe())?.controller === edKey.controller);
+  const nested = await outcomeOf(zcapClient.request({ url: `${WAS}/space/${under.data.id}/spaces`, method: "POST", action: "POST", json: { controller: edKey.controller } }));
+  check("a Space created under an account creates none itself", nested.status === 403 && nested.type === ACCOUNT_REQUIRED, `${nested.status} ${nested.type}`);
+  const forAnother = await outcomeOf(zcapClient.request({ url: accountSpacesUrl, method: "POST", action: "POST", json: { controller: delegateKey.controller } }));
+  check("the account's controller creates no Space for another key", forAnother.status === 400, forAnother.status);
+  // By delegation: a data grant on the account Space is refused, a POST-only
+  // grant of exactly the Spaces URL creates a Space for the key that holds it
+  const dataGrant = await zcapClient.delegate({
+    capability: `urn:zcap:root:${encodeURIComponent(`${WAS}/space/${spaceId}/`)}`,
+    controller: delegateKey.controller,
+    invocationTarget: `${WAS}/space/${spaceId}/`,
+    allowedActions: ["GET", "POST"],
+    expires: new Date(Date.now() + 600 * 1000),
+  });
+  const viaDataGrant = await outcomeOf(delegateClient.request({ url: accountSpacesUrl, method: "POST", action: "POST", capability: dataGrant, json: { controller: delegateKey.controller } }));
+  check("a data grant on the account Space creates no Space (the container rule)", viaDataGrant.status === 404, viaDataGrant.status);
+  const creationGrant = await zcapClient.delegate({
+    capability: `urn:zcap:root:${encodeURIComponent(accountSpacesUrl)}`,
+    controller: delegateKey.controller,
+    invocationTarget: accountSpacesUrl,
+    allowedActions: ["POST"],
+    expires: new Date(Date.now() + 600 * 1000),
+  });
+  const delegated = await delegateClient.request({ url: accountSpacesUrl, method: "POST", action: "POST", capability: creationGrant, json: { controller: delegateKey.controller, name: "live check (delegated)" } });
+  const asDelegate = await WasClient.fromSigner({ serverUrl: WAS, signer: delegateKey.signer() });
+  createdUnder.push(asDelegate.space(delegated.data.id));
+  check("a POST-only grant of the Spaces URL creates a Space for the key that holds it", delegated.status === 201 && delegated.data.controller === delegateKey.controller, delegated.status);
+  check("listSpaces() under that key lists it", (await asDelegate.listSpaces()).items.some((item) => item.id === delegated.data.id));
 
   const collections = await space.collections();
   check("space.collections() lists both collections", ["notes", "vault"].every((id) => collections?.items.some((item) => item.id === id)));
@@ -263,6 +304,10 @@ try {
   console.error("FAIL with error:", err);
   failures++;
 } finally {
+  for (const created of createdUnder) {
+    const gone = await created.deleteWithOutcome().catch((err) => ({ outcome: err.message }));
+    check(`Space under the account deleted (${gone.outcome})`, gone.outcome === "deleted");
+  }
   const outcome = await owner.deleteWithOutcome().catch((err) => ({ outcome: err.message }));
   check(`scratch space deleted (${outcome.outcome})`, outcome.outcome === "deleted");
 }

@@ -2142,3 +2142,253 @@ test("the quota watch publishes the bucket and coupon-less counts", async () => 
   assert.deepEqual(published, { SpaceBuckets: report.buckets, CouponlessSpaces: 1 });
   assert.ok(fakes.cloudwatch.metrics.every((metric) => metric.namespace === "PwsServer"));
 });
+
+// --- Spaces created under an account Space -------------------------------------
+
+// A coupon is spent once, on the account Space; every further Space of the
+// account is created at POST /space/{account}/spaces, authorized by a
+// capability on the account Space.
+
+const ACCOUNT_SPACES_URL = `${SPACE_URL}spaces`;
+const UNLOCK_TYPE = ["AuxiliarySpace", "Space", "UnlockSpace"];
+const registryRow = (id) => fakes.dynamo.tables["pws-spaces"].get(`${BASE}/space/${id}`);
+
+// The account Space's controller hands `to` the capability to create one
+// Space under the account: POST only, on exactly the account's Spaces URL.
+const delegateSpaceCreation = (to, options = {}) =>
+  new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: controllerKey.signer() }).delegate({
+    capability: rootCapabilityId(ACCOUNT_SPACES_URL),
+    controller: to.controller,
+    invocationTarget: ACCOUNT_SPACES_URL,
+    allowedActions: ["POST"],
+    expires: new Date(Date.now() + 300 * 1000),
+    ...options,
+  });
+
+test("POST /space/{s}/spaces creates Spaces under an account Space; the coupon is spent once, on the account", async () => {
+  const account = await invoke({ method: "POST", path: "/spaces/", json: { controller: controllerKey.controller, name: "Issuer", coupon: "one-shot" } });
+  assert.equal(account.status, 201, account.body);
+  assert.equal(registryRow(account.json.id).provisioning.S, "coupon");
+  assert.equal(registryRow(account.json.id).account, undefined);
+
+  const path = `/space/${account.json.id}/spaces`;
+  const first = await invoke({ method: "POST", path, json: { controller: controllerKey.controller, name: "Batch 1", type: ["Space", "BatchSpace"] } });
+  assert.equal(first.status, 201, first.body);
+  assert.equal(first.fn, "space/spaces-post");
+  assert.match(first.json.id, /^dcc-pws-[0-9a-f-]{36}$/);
+  assert.equal(first.headers.location, `${BASE}/space/${first.json.id}/`);
+  assert.ok(first.headers.etag);
+  assert.deepEqual(first.json.type, ["Space", "BatchSpace"]);
+  assert.equal(first.json.name, "Batch 1");
+  assert.equal(first.json.controller, controllerKey.controller);
+  assert.equal(first.json.createdBy, controllerKey.controller);
+  assert.ok(fakes.s3.buckets.get(first.json.id).has("meta/space.json"));
+  const row = registryRow(first.json.id);
+  assert.equal(row.did.S, controllerKey.controller);
+  assert.deepEqual(row.type.L, [{ S: "Space" }, { S: "BatchSpace" }]);
+  assert.equal(row.provisioning.S, "account");
+  assert.equal(row.account.S, `${BASE}/space/${account.json.id}`);
+
+  // The one-use coupon is spent, and nothing more is asked of it: a second
+  // Space, and one with an id the client chose
+  assert.equal(fakes.dynamo.tables["pws-coupons"].get("one-shot").usesRemaining.N, "0");
+  const second = await invoke({ method: "POST", path, json: { controller: controllerKey.controller } });
+  assert.equal(second.status, 201, second.body);
+  assert.deepEqual(second.json.type, ["Space"]);
+  const chosen = deriveSpaceId(controllerKey.controller);
+  const third = await invoke({ method: "POST", path, json: { id: chosen, controller: controllerKey.controller, type: UNLOCK_TYPE } });
+  assert.equal(third.status, 201, third.body);
+  assert.equal(third.json.id, chosen);
+  assert.ok(fakes.s3.buckets.has(bucketOf(chosen)));
+  const taken = await invoke({ method: "POST", path, json: { id: chosen, controller: controllerKey.controller } });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.json.type, "https://w3id.org/pws#id-conflict");
+  // A second account needs a coupon of its own
+  const another = await invoke({ method: "POST", path: "/spaces/", json: { controller: controllerKey.controller, coupon: "one-shot" } });
+  assert.equal(another.status, 403);
+  assert.equal(another.json.type, "https://github.com/digitalcredentials/was-server-aws#coupon-required");
+
+  // The new Spaces are their controller's like any other: listed, usable
+  const listed = await invoke({ path: "/spaces/" });
+  for (const id of [first.json.id, second.json.id, chosen]) {
+    assert.ok(listed.json.items.some((item) => item.id === id), id);
+  }
+  const written = await invoke({ method: "PUT", path: `/space/${first.json.id}/batch/batch.json`, json: { v: 1 } });
+  assert.equal(written.status, 201, written.body);
+
+  // None of this is a coupon-less creation: the cap's counter is untouched,
+  // a whole-registry sweep counts none of them, and deleting one gives no
+  // slot back
+  assert.equal(await readCouponlessCount(), 0);
+  assert.deepEqual((await sweep({})).couponlessSpaces, { count: 0, max: 200 });
+  const gone = await invoke({ method: "DELETE", path: `/space/${chosen}/` });
+  assert.equal(gone.status, 204);
+  assert.equal(await readCouponlessCount(), 0);
+});
+
+test("only an account Space creates Spaces: one created under an account does not, nor does an unlock Space", async () => {
+  const child = await invoke({ method: "POST", path: `/space/${SPACE}/spaces`, json: { controller: controllerKey.controller } });
+  assert.equal(child.status, 201, child.body);
+  const grandchild = await invoke({ method: "POST", path: `/space/${child.json.id}/spaces`, json: { controller: controllerKey.controller } });
+  assert.equal(grandchild.status, 403);
+  assert.equal(grandchild.headers["content-type"], PROBLEM);
+  assert.equal(grandchild.json.type, "https://github.com/digitalcredentials/was-server-aws#account-required");
+
+  // An unlock Space any key holder creates without a coupon is no account
+  const unlock = await createUnlockSpace(strangerKey);
+  assert.equal(unlock.status, 201, unlock.body);
+  const underUnlock = await invoke({
+    method: "POST",
+    path: `/space/${deriveSpaceId(strangerKey.controller)}/spaces`,
+    json: { controller: strangerKey.controller },
+    signer: strangerKey,
+  });
+  assert.equal(underUnlock.status, 403);
+  assert.equal(underUnlock.json.type, "https://github.com/digitalcredentials/was-server-aws#account-required");
+  // Neither refusal created anything: the seeded account Space, the Space
+  // under it and the unlock Space are the only buckets
+  assert.equal(fakes.s3.buckets.size, 3);
+});
+
+test("POST /space/{s}/spaces needs a capability on the account Space and a body naming the key that signs", async () => {
+  const path = `/space/${SPACE}/spaces`;
+  const before = fakes.s3.buckets.size;
+  // Unsigned, a stranger with no capability, a Space that does not exist
+  const unsigned = await invoke({ method: "POST", path, json: { controller: controllerKey.controller }, signer: null });
+  assert.equal(unsigned.status, 401);
+  const stranger = await invoke({ method: "POST", path, json: { controller: strangerKey.controller }, signer: strangerKey });
+  assert.equal(stranger.status, 404);
+  const missing = await invoke({ method: "POST", path: `/space/${SPACE_B}/spaces`, json: { controller: controllerKey.controller } });
+  assert.equal(missing.status, 404);
+  // The body no longer matches the signed digest
+  const swapped = await invoke({ method: "POST", path, json: { controller: controllerKey.controller }, deliveredJson: { controller: controllerKey.controller, name: "Other" } });
+  assert.equal(swapped.status, 400);
+  // The account's controller does not create a Space for another key ...
+  const forOther = await invoke({ method: "POST", path, json: { controller: strangerKey.controller } });
+  assert.equal(forOther.status, 400);
+  assert.equal(forOther.json.type, "https://w3id.org/pws#invalid-request-body");
+  // ... and the body is validated as POST /spaces/ validates it
+  for (const json of [{}, { controller: "did:web:example.org" }, { controller: controllerKey.controller, name: 7 }, { controller: controllerKey.controller, type: ["Other"] }]) {
+    const res = await invoke({ method: "POST", path, json });
+    assert.equal(res.status, 400, JSON.stringify(json));
+  }
+  const badId = await invoke({ method: "POST", path, json: { controller: controllerKey.controller, id: "mine" } });
+  assert.equal(badId.status, 400);
+  assert.equal(badId.json.type, "https://w3id.org/pws#invalid-id");
+  assert.equal(fakes.s3.buckets.size, before);
+});
+
+test("a delegated capability creates a Space under an account only as a POST-only grant of exactly that URL, for the key that holds it", async () => {
+  const path = `/space/${SPACE}/spaces`;
+  const unlockId = deriveSpaceId(strangerKey.controller);
+  const body = { id: unlockId, controller: strangerKey.controller, name: "Unlock", type: UNLOCK_TYPE };
+
+  // A data grant on the whole Space that carries POST does not create one
+  const subtree = await delegateSpace(EddsaJcs2022, ["GET", "PUT", "POST"]);
+  const broad = await invoke({ method: "POST", path, json: body, signer: strangerKey, capability: subtree });
+  assert.equal(broad.status, 404);
+  // Nor does a two-verb grant of the exact URL
+  const twoVerbs = await delegateSpaceCreation(strangerKey, { allowedActions: ["POST", "GET"] });
+  assert.equal((await invoke({ method: "POST", path, json: body, signer: strangerKey, capability: twoVerbs })).status, 404);
+  assert.ok(!fakes.s3.buckets.has(bucketOf(unlockId)));
+
+  // The POST-only grant does, for the key it was delegated to and no other
+  const grant = await delegateSpaceCreation(strangerKey);
+  const forThird = await invoke({ method: "POST", path, json: { ...body, id: undefined, controller: thirdKey.controller }, signer: strangerKey, capability: grant });
+  assert.equal(forThird.status, 400);
+  const byThird = await invoke({ method: "POST", path, json: { controller: thirdKey.controller }, signer: thirdKey, capability: grant });
+  assert.equal(byThird.status, 404);
+  const created = await invoke({ method: "POST", path, json: body, signer: strangerKey, capability: grant });
+  assert.equal(created.status, 201, created.body);
+  assert.equal(created.json.id, unlockId);
+  assert.equal(created.json.controller, strangerKey.controller);
+  const row = registryRow(unlockId);
+  assert.equal(row.did.S, strangerKey.controller);
+  assert.equal(row.provisioning.S, "account");
+  assert.equal(row.account.S, `${BASE}/space/${SPACE}`);
+  // The new Space is its controller's alone
+  const mine = await invoke({ path: `/space/${unlockId}/meta`, signer: strangerKey });
+  assert.equal(mine.status, 200);
+  assert.equal((await invoke({ path: `/space/${unlockId}/meta` })).status, 404);
+
+  // The holder of the whole-Space grant narrows it into the POST-only child
+  // for a third key, whose invocation of that child creates its Space
+  const child = await new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: strangerKey.signer() }).delegate({
+    capability: subtree,
+    controller: thirdKey.controller,
+    invocationTarget: ACCOUNT_SPACES_URL,
+    allowedActions: ["POST"],
+    expires: new Date(Date.now() + 300 * 1000),
+  });
+  const viaChild = await invoke({ method: "POST", path, json: { controller: thirdKey.controller }, signer: thirdKey, capability: child });
+  assert.equal(viaChild.status, 201, viaChild.body);
+  assert.equal(registryRow(viaChild.json.id).did.S, thirdKey.controller);
+
+  // The controller revokes the grant: it creates nothing more
+  const revoked = await invoke({ method: "POST", path: `/space/${SPACE}/zcaps/revocations/${encodeURIComponent(grant.id)}`, json: grant });
+  assert.equal(revoked.status, 204, revoked.body);
+  const after = await invoke({ method: "POST", path, json: { controller: strangerKey.controller }, signer: strangerKey, capability: grant });
+  assert.equal(after.status, 404);
+  assert.equal(after.json.type, "https://w3id.org/pws#capability-revoked");
+});
+
+test("a wallet account creates a sign-in method's unlock Space from either kind of session", async () => {
+  const { account, annex } = await seedAnnexAccount();
+  const path = `/space/${ACCT}/spaces`;
+  const target = `${ACCT_URL}spaces`;
+  const expires = new Date(Date.now() + 300 * 1000);
+  const newKeys = await Promise.all(["passkey-a", "passkey-b", "passkey-c"].map((seed) => keyFromSeed(`${seed}-000000000000000000000000`)));
+  const bodyFor = (key) => ({ id: deriveSpaceId(key.controller), controller: key.controller, name: "Unlock", type: UNLOCK_TYPE });
+
+  // A passkey session signs as the account: its key delegates the POST-only
+  // grant to the new credential's did:key, which creates its own Space
+  const enrolled = new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: asWebvh(controllerKey, account.did).signer() });
+  const fromAccount = await enrolled.delegate({ capability: rootCapabilityId(target), controller: newKeys[0].controller, invocationTarget: target, allowedActions: ["POST"], expires });
+  const first = await invoke({ method: "POST", path, json: bodyFor(newKeys[0]), signer: newKeys[0], capability: fromAccount });
+  assert.equal(first.status, 201, first.body);
+  assert.equal(registryRow(first.json.id).did.S, newKeys[0].controller);
+  assert.equal(registryRow(first.json.id).account.S, `${BASE}/space/${ACCT}`);
+
+  // A passphrase session signs as the client annex under the generation
+  // delegation (ladder-signed, the whole Space): its per-visit key narrows
+  // that into the POST-only grant for the new credential's did:key
+  const generation = await ladderDelegate(account, { controller: annex.did, invocationTarget: ACCT_URL, allowedActions: WAS_ACTIONS });
+  const visit = new ZcapClient({ SuiteClass: EddsaJcs2022, delegationSigner: asWebvh(transientKey, annex.did).signer() });
+  const fromVisit = await visit.delegate({ capability: generation, controller: newKeys[1].controller, invocationTarget: target, allowedActions: ["POST"], expires });
+  const second = await invoke({ method: "POST", path, json: bodyFor(newKeys[1]), signer: newKeys[1], capability: fromVisit });
+  assert.equal(second.status, 201, second.body);
+  assert.equal(registryRow(second.json.id).did.S, newKeys[1].controller);
+  assert.equal(registryRow(second.json.id).provisioning.S, "account");
+
+  // The generation delegation itself, the whole-subtree grant, creates none
+  const direct = await invoke({ method: "POST", path, json: bodyFor(newKeys[2]), signer: asWebvh(transientKey, annex.did), capability: generation });
+  assert.equal(direct.status, 404);
+  // The ladder VM cannot hand the grant out itself: the client-annex clause
+  // admits no such shape
+  const fromLadder = await ladderDelegate(account, { capability: rootCapabilityId(target), controller: newKeys[2].controller, invocationTarget: target, allowedActions: ["POST"] });
+  const refused = await invoke({ method: "POST", path, json: bodyFor(newKeys[2]), signer: newKeys[2], capability: fromLadder });
+  assert.equal(refused.status, 404);
+  // And the account itself, a did:webvh, is not the controller of a new
+  // Space: the controller is a did:key that signs for it
+  const asAccount = await invoke({ method: "POST", path, json: { controller: account.did }, signer: asWebvh(controllerKey, account.did) });
+  assert.equal(asAccount.status, 400);
+  assert.ok(!fakes.s3.buckets.has(bucketOf(deriveSpaceId(newKeys[2].controller))));
+});
+
+test("`spaces` is reserved at the collection position of every Space", async () => {
+  const create = await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: "spaces" } });
+  assert.equal(create.status, 409);
+  assert.equal(create.json.type, "https://w3id.org/pws#reserved-id");
+  const byMeta = await invoke({ method: "PUT", path: `/space/${SPACE}/spaces/meta`, json: { id: "spaces" }, headers: { "if-none-match": "*" } });
+  assert.equal(byMeta.status, 409);
+  const resource = await invoke({ method: "PUT", path: `/space/${SPACE}/spaces/one`, json: { v: 1 } });
+  assert.equal(resource.status, 409);
+  // The URL takes POST alone
+  for (const method of ["GET", "DELETE"]) {
+    const res = await invoke({ method, path: `/space/${SPACE}/spaces` });
+    assert.equal(res.status, 405, method);
+  }
+  // Collections whose ids only resemble it are unaffected
+  const near = await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: "spaces-2" } });
+  assert.equal(near.status, 201, near.body);
+});

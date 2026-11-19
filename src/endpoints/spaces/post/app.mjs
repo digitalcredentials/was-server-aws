@@ -1,35 +1,36 @@
-import { randomUUID } from "node:crypto";
-import { DynamoDBClient, GetItemCommand, PutItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
-import { CreateBucketCommand, PutBucketNotificationConfigurationCommand } from "@aws-sdk/client-s3";
+import { DynamoDBClient, GetItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { plainHandler } from "was-lib/handler.mjs";
 import { json, parseJsonBody, NO_STORE } from "was-lib/http.mjs";
 import { verifyDigest } from "was-lib/auth.mjs";
-import { s3, bucketOf } from "was-lib/store.mjs";
-import { now, spaceUrl, typesOf, writeSpaceMeta } from "was-lib/meta.mjs";
-import { isReservedSpaceId, isValidSpaceId } from "was-lib/ids.mjs";
-import { HttpProblem, idConflict, invalidId, invalidRequestBody, notFound, reservedId } from "was-lib/problems.mjs";
+import { spaceUrl } from "was-lib/meta.mjs";
+import { HttpProblem, invalidRequestBody, notFound } from "was-lib/problems.mjs";
+import { chooseSpaceId, provisionSpace, spaceRequestOf } from "was-lib/provision.mjs";
 
-// POST /spaces/ -- provision a Space. Per the spec the request must be
-// authorized by the `controller` DID in the body: the authorizer verified
+// POST /spaces/ -- provision an account Space. Per the spec the request must
+// be authorized by the `controller` DID in the body: the authorizer verified
 // the invocation against the DID that signed it, and that DID must be the
-// stated controller. This server additionally requires a coupon. The id is
-// server-assigned (`dcc-pws-{uuid}`, also the bucket name) unless the body
-// names one: a wallet built on wallet-core mints its account Space's id
-// before genesis, redeems the coupon here with that id, and genesis then
-// finds the Space in place (its provisioning step is an ensure). A client
-// id maps to its bucket through `bucketOf`, and an id already in use is a
-// conflict. The bucket is created with its metadata object and the Space
-// registered.
+// stated controller. This server additionally requires a coupon (a
+// registration code), and the Space it creates is an account Space: the
+// one Space of an account that a code is spent on. Every further Space of
+// the account is created under it, at POST /space/{s}/spaces, with no
+// coupon (src/endpoints/space/spaces-post).
+//
+// The id is server-assigned (`dcc-pws-{uuid}`, also the bucket name) unless
+// the body names one: a wallet built on wallet-core mints its account
+// Space's id before genesis, redeems the coupon here with that id, and
+// genesis then finds the Space in place (its provisioning step is an
+// ensure). A client id maps to its bucket through `bucketOf`, and an id
+// already in use is a conflict. The bucket is created with its metadata
+// object and the Space registered (was-lib/provision.mjs).
 //
 // The registry row (the pws-spaces table, keyed by space URL without a
 // trailing slash, with a by-did index) holds authorization and lookup data
 // only: the controller DID, the type array, the name (mirrored for
-// listings) and the creation time.
+// listings), the creation time and how the Space was provisioned
+// (`coupon` here, which is what makes it an account Space).
 
 const dynamo = new DynamoDBClient({});
-const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
 const COUPONS_TABLE = process.env.COUPONS_TABLE_NAME ?? "pws-coupons";
-const SPACE_URL_BASE = (process.env.SPACE_URL_BASE ?? "https://was.example.org/space").replace(/\/+$/, "");
 
 const couponRequired = () =>
   new HttpProblem({
@@ -42,7 +43,7 @@ const couponRequired = () =>
 // Redeems a coupon: the row must exist, must not be expired (expiresAt,
 // absent = never), and must have uses left (usesRemaining, absent =
 // unlimited). A finite coupon is decremented with a conditional update, so
-// concurrent redemptions cannot overspend it.
+// concurrent redemptions cannot overspend it. One use is one account.
 async function redeemCoupon(coupon) {
   if (!coupon || typeof coupon !== "string") {
     return false;
@@ -79,55 +80,6 @@ async function redeemCoupon(coupon) {
   }
 }
 
-async function registerSpace({ url, controller, type, name, createdAt }) {
-  try {
-    await dynamo.send(
-      new PutItemCommand({
-        TableName: SPACES_TABLE,
-        Item: {
-          spaceURL: { S: url },
-          did: { S: controller },
-          type: { L: type.map((entry) => ({ S: entry })) },
-          ...(name !== undefined && { name: { S: name } }),
-          CreatedAt: { S: createdAt },
-          // A coupon was spent: outside the cap on coupon-less Spaces
-          provisioning: { S: "coupon" },
-        },
-        ConditionExpression: "attribute_not_exists(spaceURL)",
-      })
-    );
-  } catch (err) {
-    if (err?.name === "ConditionalCheckFailedException") {
-      throw idConflict("A Space with this id already exists.");
-    }
-    throw err;
-  }
-}
-
-async function isRegistered(url) {
-  const { Item } = await dynamo.send(new GetItemCommand({ TableName: SPACES_TABLE, Key: { spaceURL: { S: url } } }));
-  return Boolean(Item);
-}
-
-// The id the Space gets: the client's, when the body names one it may
-// choose (a valid id form, not reserved, not in use), else a fresh
-// server-assigned one.
-async function chooseSpaceId(id) {
-  if (id === undefined) {
-    return { spaceId: `dcc-pws-${randomUUID()}`, chosen: false };
-  }
-  if (typeof id !== "string" || !isValidSpaceId(id)) {
-    throw invalidId("A Space id must be a server-assigned id or 43 URL-safe characters.");
-  }
-  if (isReservedSpaceId(id)) {
-    throw reservedId(id);
-  }
-  if (await isRegistered(`${SPACE_URL_BASE}/${id}`)) {
-    throw idConflict("A Space with this id already exists.");
-  }
-  return { spaceId: id, chosen: true };
-}
-
 export const lambdaHandler = plainHandler(async (req) => {
   // The gateway routes /spaces/{anything} here too; only /spaces/ is the
   // repository.
@@ -135,53 +87,23 @@ export const lambdaHandler = plainHandler(async (req) => {
     throw notFound();
   }
   const body = parseJsonBody(req, { problem: invalidRequestBody });
-  const { controller, name, coupon, id } = body;
-  if (typeof controller !== "string" || !controller.startsWith("did:key:")) {
-    throw invalidRequestBody('"controller" must be a did:key DID.');
-  }
-  if (name !== undefined && typeof name !== "string") {
-    throw invalidRequestBody('"name" must be a string.');
-  }
-  const type = typesOf(body, "Space");
-  const controllerDid = controller.split("#")[0];
+  const { controller, name, type, id } = spaceRequestOf(body);
 
-  if (req.auth.verified !== "true" || req.auth.controller !== controllerDid) {
+  if (req.auth.verified !== "true" || req.auth.controller !== controller) {
     throw invalidRequestBody("The request is not authorized by the stated controller.");
   }
   verifyDigest(req);
 
   // The id is settled before the coupon is spent, so a conflict costs
-  // nothing; two requests racing for one id are caught by the metadata
-  // object's If-None-Match and the registry row's condition below
+  // nothing
   const { spaceId, chosen } = await chooseSpaceId(id);
-  if (!(await redeemCoupon(coupon))) {
+  if (!(await redeemCoupon(body.coupon))) {
     throw couponRequired();
   }
 
-  const stamp = now();
-  const doc = {
-    id: spaceId,
-    type,
-    ...(name !== undefined && { name }),
-    controller: controllerDid,
-    createdBy: controllerDid,
-    createdAt: stamp,
-    updatedAt: stamp,
-  };
-  const bucket = bucketOf(spaceId);
-  await s3.send(new CreateBucketCommand({ Bucket: bucket }));
-  // The bucket's object events feed the Collections' `changes` feeds
-  await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: bucket, NotificationConfiguration: { EventBridgeConfiguration: {} } }));
-  let written;
-  try {
-    written = await writeSpaceMeta(req, spaceId, doc, chosen ? { ifNoneMatch: "*" } : {});
-  } catch (err) {
-    if (err instanceof HttpProblem && err.status === 412) {
-      throw idConflict("A Space with this id already exists.");
-    }
-    throw err;
-  }
-  await registerSpace({ url: `${SPACE_URL_BASE}/${spaceId}`, controller: controllerDid, type, name, createdAt: stamp });
+  // A coupon was spent: an account Space, outside the cap on coupon-less
+  // Spaces
+  const written = await provisionSpace(req, { spaceId, chosen, controller, name, type, provisioning: "coupon" });
 
   return json(req, 201, written.doc, {
     ...NO_STORE,
