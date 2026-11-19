@@ -26,3 +26,14 @@ body:
       label: What you expected
     validations:
       required: true
+  - type: upload
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: >-
+        Optional. Drag images here or click to choose them. Screenshots are
+        public, like the rest of this issue, so cover your email, your name,
+        and anything else private first.
+    validations:
+      required: false
+      accept: ".png,.jpg,.jpeg,.gif,.webp"
