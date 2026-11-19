@@ -377,6 +377,11 @@ export class FakeDynamo {
         const table = this.table(input.TableName);
         const key = this.keyOf(input);
         const item = table.get(key);
+        // attribute_exists(<key attribute>): an update of a row that must
+        // already be there, never an insert
+        if (input.ConditionExpression?.includes("attribute_exists(spaceURL)") && item === undefined) {
+          throw awsError("ConditionalCheckFailedException", 400);
+        }
         // ADD #field :delta, with the two conditions the counters use:
         // `attribute_not_exists(#f) OR #f < :max` and `#f > :zero`
         if (input.UpdateExpression.startsWith("ADD ")) {
