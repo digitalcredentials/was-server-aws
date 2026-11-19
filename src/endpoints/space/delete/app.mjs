@@ -4,7 +4,7 @@ import { handler } from "was-lib/handler.mjs";
 import { noContent, NO_STORE } from "was-lib/http.mjs";
 import { s3, isNoBucket, deletePrefix, bucketOf } from "was-lib/store.mjs";
 import { purgeBucket } from "was-lib/feed.mjs";
-import { isCouponlessRow, releaseCouponlessSlot } from "was-lib/quota.mjs";
+import { accountOf, isCouponlessRow, releaseAccountSpace, releaseCouponlessSlot } from "was-lib/quota.mjs";
 
 // DELETE /space/{s}/ -- the whole Space: its bucket (emptied first) and its
 // registry row. The root capability, or a delegated capability whose tail
@@ -13,7 +13,8 @@ import { isCouponlessRow, releaseCouponlessSlot } from "was-lib/quota.mjs";
 // inspector (src/authorizer/container.mjs) applies, so this handler takes a
 // verified delegated chain. An already-missing bucket is tolerated so a
 // half-deleted Space can be cleaned up by retrying. A Space created without
-// a coupon gives its slot under the global cap back.
+// a coupon gives its slot under the global cap back, and one created under
+// an account Space gives its place under that account's limit back.
 
 const dynamo = new DynamoDBClient({});
 const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
@@ -34,6 +35,9 @@ export const lambdaHandler = handler(
     );
     if (row && isCouponlessRow(row)) {
       await releaseCouponlessSlot();
+    }
+    if (accountOf(row) !== undefined) {
+      await releaseAccountSpace(accountOf(row));
     }
     // The Collections' feeds go with the Space (a re-created unlock Space
     // reuses the bucket name)

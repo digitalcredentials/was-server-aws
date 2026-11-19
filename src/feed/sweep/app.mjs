@@ -4,7 +4,17 @@ import { SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBClient, ScanCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { bucketOf, headObject, listAllKeys } from "was-lib/store.mjs";
 import { classifyKey, keyOfRecord, allFeedRows } from "was-lib/feed.mjs";
-import { isCounterRow, isCouponlessRow, maxCouponlessSpaces, provisioningOf, setCouponlessCount } from "was-lib/quota.mjs";
+import {
+  accountOf,
+  accountSpaceCountOf,
+  isCounterRow,
+  isCouponlessRow,
+  maxCouponlessSpaces,
+  maxSpacesPerAccount,
+  provisioningOf,
+  setAccountSpaceCount,
+  setCouponlessCount,
+} from "was-lib/quota.mjs";
 
 // The feed sweep: compares a bucket's objects with its feed rows and
 // queues a synthetic event for every record the feed has wrong or missing
@@ -13,7 +23,10 @@ import { isCounterRow, isCouponlessRow, maxCouponlessSpaces, provisioningOf, set
 // events. It also makes sure the bucket publishes its object events to
 // EventBridge, which is what a bucket created before the feed existed
 // lacks. Invoked by hand or on a schedule with `{ "buckets": [...] }`, or
-// with no input for every registered Space.
+// with no input for every registered Space. A run over the whole registry
+// also recounts what the registry's counters hold (the Spaces created
+// without a coupon, and the Spaces under each account);
+// `{ "registryOnly": true }` does that recount and sweeps no bucket.
 
 const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
 const QUEUE_URL = process.env.FEED_QUEUE_URL;
@@ -30,8 +43,8 @@ async function registeredSpaces() {
     const out = await dynamo.send(
       new ScanCommand({
         TableName: SPACES_TABLE,
-        ProjectionExpression: "spaceURL, #provisioning",
-        ExpressionAttributeNames: { "#provisioning": "provisioning" },
+        ProjectionExpression: "spaceURL, #provisioning, #account, #accountSpaces",
+        ExpressionAttributeNames: { "#provisioning": "provisioning", "#account": "account", "#accountSpaces": "accountSpaces" },
         ...(cursor && { ExclusiveStartKey: cursor }),
       })
     );
@@ -70,6 +83,31 @@ async function reconcileCouponless(rows) {
   }
   await setCouponlessCount(count);
   return { count, max: maxCouponlessSpaces() };
+}
+
+// Recounts the Spaces under each account from the rows that name it
+// (`account`) and corrects every account row whose count differs: one that
+// was never counted (created before the limit existed), and one a failure
+// between a write and its count left behind. An account Space that is gone
+// gets no row back.
+async function reconcileAccounts(rows) {
+  const counted = new Map();
+  for (const row of rows) {
+    const account = accountOf(row);
+    if (account !== undefined) {
+      counted.set(account, (counted.get(account) ?? 0) + 1);
+    }
+  }
+  let corrected = 0;
+  for (const row of rows) {
+    const url = row.spaceURL.S;
+    const count = counted.get(url) ?? 0;
+    // A row with nothing under it and no count recorded stands as it is
+    if (count !== accountSpaceCountOf(row) && (await setAccountSpaceCount(url, count))) {
+      corrected++;
+    }
+  }
+  return { accounts: counted.size, spaces: [...counted.values()].reduce((sum, n) => sum + n, 0), corrected, max: maxSpacesPerAccount() };
 }
 
 export async function ensureBucketEvents(bucket) {
@@ -156,10 +194,11 @@ export const lambdaHandler = async (input = {}) => {
   if (Array.isArray(input.buckets) && input.buckets.length) {
     buckets = input.buckets;
   } else {
-    // A whole-registry sweep also reconciles the coupon-less counter
+    // A whole-registry sweep also reconciles the registry's counters
     const rows = await registeredSpaces();
-    buckets = bucketsOf(rows);
+    buckets = input.registryOnly === true ? [] : bucketsOf(rows);
     report.couponlessSpaces = await reconcileCouponless(rows);
+    report.accountSpaces = await reconcileAccounts(rows);
   }
   for (const bucket of buckets) {
     try {

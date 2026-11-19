@@ -2392,3 +2392,161 @@ test("`spaces` is reserved at the collection position of every Space", async () 
   const near = await invoke({ method: "POST", path: `/space/${SPACE}/`, json: { id: "spaces-2" } });
   assert.equal(near.status, 201, near.body);
 });
+
+// --- the limit on the Spaces of one account -----------------------------------
+
+const accountCount = (id) => Number(registryRow(id).accountSpaces?.N ?? 0);
+const createUnder = (accountId, json = { controller: controllerKey.controller }, extra = {}) =>
+  invoke({ method: "POST", path: `/space/${accountId}/spaces`, json, ...extra });
+
+test("an account holds at most the limit of Spaces created under it; a refusal creates nothing; a delete gives a place back", async () => {
+  process.env.MAX_SPACES_PER_ACCOUNT = "2";
+  try {
+    const first = await createUnder(SPACE);
+    const second = await createUnder(SPACE);
+    assert.equal(first.status, 201, first.body);
+    assert.equal(second.status, 201, second.body);
+    assert.equal(accountCount(SPACE), 2);
+    // Past the limit: the spec's 507, no bucket, no row, the count unmoved
+    const buckets = fakes.s3.buckets.size;
+    const third = await createUnder(SPACE);
+    assert.equal(third.status, 507);
+    assert.equal(third.headers["content-type"], PROBLEM);
+    assert.equal(third.json.type, "https://w3id.org/pws#quota-exceeded");
+    assert.match(third.json.detail, /already holds 2 Spaces/);
+    assert.equal(fakes.s3.buckets.size, buckets);
+    assert.equal(accountCount(SPACE), 2);
+    // An id that is taken is a conflict whatever the count, and takes no place
+    const taken = await createUnder(SPACE, { id: first.json.id, controller: controllerKey.controller });
+    assert.equal(taken.status, 409);
+    assert.equal(accountCount(SPACE), 2);
+
+    // The limit is each account's own: another account Space is at zero
+    await seedSpace(fakes, { spaceId: SPACE_B });
+    const elsewhere = await createUnder(SPACE_B);
+    assert.equal(elsewhere.status, 201, elsewhere.body);
+    assert.equal(accountCount(SPACE_B), 1);
+    assert.equal(accountCount(SPACE), 2);
+
+    // Deleting a Space of the account gives its place back, once
+    const gone = await invoke({ method: "DELETE", path: `/space/${first.json.id}/` });
+    assert.equal(gone.status, 204);
+    assert.equal(accountCount(SPACE), 1);
+    const again = await invoke({ method: "DELETE", path: `/space/${first.json.id}/` });
+    assert.equal(again.status, 404);
+    assert.equal(accountCount(SPACE), 1);
+    const retried = await createUnder(SPACE);
+    assert.equal(retried.status, 201, retried.body);
+    assert.equal(accountCount(SPACE), 2);
+
+    // The count is the account Space's alone: the Spaces under it carry none,
+    // and neither kind of row is a coupon-less Space
+    assert.equal(registryRow(second.json.id).accountSpaces, undefined);
+    assert.equal(await readCouponlessCount(), 0);
+
+    // A limit of 0 closes the route
+    process.env.MAX_SPACES_PER_ACCOUNT = "0";
+    const closed = await createUnder(SPACE_B);
+    assert.equal(closed.status, 507);
+    assert.equal(accountCount(SPACE_B), 1);
+  } finally {
+    delete process.env.MAX_SPACES_PER_ACCOUNT;
+  }
+});
+
+test("a Space created by delegation counts against the account it was created under, and its own controller's delete gives the place back", async () => {
+  process.env.MAX_SPACES_PER_ACCOUNT = "1";
+  try {
+    const path = `/space/${SPACE}/spaces`;
+    const grant = await delegateSpaceCreation(strangerKey);
+    const created = await invoke({ method: "POST", path, json: { controller: strangerKey.controller }, signer: strangerKey, capability: grant });
+    assert.equal(created.status, 201, created.body);
+    assert.equal(accountCount(SPACE), 1);
+    // The account is full for its own controller too
+    assert.equal((await createUnder(SPACE)).status, 507);
+    // The holder of a still-valid grant is refused the same way, and told so
+    const more = await invoke({ method: "POST", path, json: { controller: strangerKey.controller }, signer: strangerKey, capability: grant });
+    assert.equal(more.status, 507);
+    assert.equal(more.json.type, "https://w3id.org/pws#quota-exceeded");
+    // The new Space's controller, not the account's, deletes it
+    const gone = await invoke({ method: "DELETE", path: `/space/${created.json.id}/`, signer: strangerKey });
+    assert.equal(gone.status, 204);
+    assert.equal(accountCount(SPACE), 0);
+    assert.equal((await createUnder(SPACE)).status, 201);
+  } finally {
+    delete process.env.MAX_SPACES_PER_ACCOUNT;
+  }
+});
+
+test("a creation that fails after its place was taken gives the place back", async () => {
+  const send = fakes.s3.send.bind(fakes.s3);
+  fakes.s3.send = async (command) => {
+    if (command.constructor.name === "CreateBucketCommand") {
+      throw Object.assign(new Error("ServiceUnavailable"), { name: "ServiceUnavailable", $metadata: { httpStatusCode: 503 } });
+    }
+    return send(command);
+  };
+  try {
+    const failed = await createUnder(SPACE);
+    assert.equal(failed.status, 500);
+    assert.equal(accountCount(SPACE), 0);
+  } finally {
+    fakes.s3.send = send;
+  }
+  const after = await createUnder(SPACE);
+  assert.equal(after.status, 201, after.body);
+  assert.equal(accountCount(SPACE), 1);
+});
+
+test("the Spaces under an account outlive it: deleting them afterwards moves no count and brings no row back", async () => {
+  const account = await invoke({ method: "POST", path: "/spaces/", json: { controller: controllerKey.controller, coupon: "open-sesame" } });
+  const child = await createUnder(account.json.id);
+  assert.equal(child.status, 201, child.body);
+  assert.equal((await invoke({ method: "DELETE", path: `/space/${account.json.id}/` })).status, 204);
+  assert.equal(registryRow(account.json.id), undefined);
+  // The Space under it is still its controller's
+  assert.equal((await invoke({ path: `/space/${child.json.id}/meta` })).status, 200);
+  assert.equal((await invoke({ method: "DELETE", path: `/space/${child.json.id}/` })).status, 204);
+  assert.equal(registryRow(account.json.id), undefined);
+});
+
+test("a registry-only sweep recounts the Spaces under each account and corrects the rows that differ", async () => {
+  // Two Spaces created before the limit existed: rows that name their
+  // account, and an account row that was never counted
+  const older = [];
+  for (let n = 0; n < 2; n++) {
+    const res = await createUnder(SPACE);
+    assert.equal(res.status, 201, res.body);
+    older.push(res.json.id);
+  }
+  delete registryRow(SPACE).accountSpaces;
+  // A second account with one Space under it and one whose account Space
+  // is gone, its count left too high by a failure between a delete and its
+  // release
+  await seedSpace(fakes, { spaceId: SPACE_B });
+  const one = await createUnder(SPACE_B);
+  const orphan = await createUnder(SPACE_B);
+  assert.equal(one.status, 201, one.body);
+  assert.equal(orphan.status, 201, orphan.body);
+  const orphanAccount = `${BASE}/space/dcc-pws-0000dead-0000-4000-8000-00000000dead`;
+  registryRow(orphan.json.id).account = { S: orphanAccount };
+  registryRow(SPACE_B).accountSpaces = { N: "7" };
+
+  const buckets = fakes.s3.buckets.size;
+  const report = await sweep({ registryOnly: true });
+  assert.deepEqual(report.accountSpaces, { accounts: 3, spaces: 4, corrected: 2, max: 100 });
+  assert.equal(accountCount(SPACE), 2);
+  assert.equal(accountCount(SPACE_B), 1);
+  // No row is made for the account that is gone, and no bucket was swept
+  assert.equal(fakes.dynamo.tables["pws-spaces"].has(orphanAccount), false);
+  assert.deepEqual(Object.keys(report).sort(), ["accountSpaces", "couponlessSpaces"]);
+  assert.equal(fakes.s3.buckets.size, buckets);
+  // A second run finds nothing to correct
+  assert.equal((await sweep({ registryOnly: true })).accountSpaces.corrected, 0);
+  // A whole-registry sweep does the same recount and sweeps the buckets too
+  registryRow(SPACE).accountSpaces = { N: "9" };
+  const whole = await sweep({});
+  assert.equal(whole.accountSpaces.corrected, 1);
+  assert.equal(accountCount(SPACE), 2);
+  assert.ok(Object.keys(whole).length > 2);
+});

@@ -139,12 +139,44 @@ Refusals: `403` with type
 the Space in the URL is not an account Space (a Space created under an
 account is not one, nor is an unlock Space created without a coupon); `400`
 when the stated controller is not the signer or the body is malformed; `404`
-for a capability that does not verify; `401` unsigned.
+for a capability that does not verify; `401` unsigned; `507 quota-exceeded`
+when the account is at its limit (below).
 
 The new Space's registry row records `provisioning: "account"` and the
 account Space it was created under (`account`). `spaces` is reserved at the
 collection position of every Space on this server (a Collection cannot take
 the id), beside the spec's own reserved segments.
+
+#### The limit on the Spaces of one account
+
+An account holds at most `MaxSpacesPerAccount` Spaces created under it at
+once (a stack parameter, default 100; `0` closes the route). For a wallet
+that is its client-annex Space and one Space per sign-in method; for the
+batch issuer, one per batch.
+
+- The count is kept on the account Space's own registry row
+  (`accountSpaces`). A creation takes a place with a conditional increment
+  before the bucket is created, so concurrent requests cannot go past the
+  limit, and gives it back if the creation fails. Deleting a Space of the
+  account gives its place back, whoever deletes it.
+- Past the limit the answer is the spec's `507 quota-exceeded`, and nothing
+  is created. An id that is already taken is a `409` and takes no place.
+- What counts is every Space whose row names the account. The account Space
+  itself does not count. Nor do the Spaces an account created with a coupon
+  of their own before 2026-11-19, which no row ties to it.
+- The Spaces under an account outlive it: deleting the account Space
+  deletes nothing else, and those Spaces are then deleted without any count
+  moving.
+- The registry sweep recounts from the rows and corrects any account row
+  that differs (one never counted because it predates the limit, or one a
+  failure left out of step): `FeedSweepFn` with `{}`, or with
+  `{"registryOnly": true}` to recount without sweeping any bucket. Run the
+  second once after the deploy that introduces the limit.
+
+The limit is one number for every account. The holder of any capability on
+a whole account Space that carries `POST` can mint the creation capability
+(that is how a passphrase session does it), so the limit is also what
+bounds a grant handed to someone else.
 
 **GET /spaces/** lists the Spaces registered to the DID that signed the
 request (the registry's `by-did` index), paged. An unsigned or unverifiable
@@ -615,8 +647,9 @@ s3://{space_id}/
 
 The registry (`pws-spaces`, the `PwsSpacesTable` of this stack) has one row
 per Space: `spaceURL` (no trailing slash), `did`, `type` (a list), `name`,
-`CreatedAt`, `provisioning` (how the Space came to exist) and, for a Space
-created under an account, `account` (that account Space's `spaceURL`), with
+`CreatedAt`, `provisioning` (how the Space came to exist), for a Space
+created under an account, `account` (that account Space's `spaceURL`), and
+on an account Space, `accountSpaces` (how many Spaces exist under it), with
 a `by-did` index for the listing. The authorizer reads it
 on every request and the Space functions write it. lcw-back-end's
 registration and login still use it by name, an interim that stage 3 of the
@@ -635,7 +668,8 @@ layers/was-lib/nodejs/node_modules/was-lib/   the shared layer (plain ESM, no de
 ├── problems.mjs     problem types
 ├── provision.mjs    creating a Space from a body: id choice, bucket, metadata, registry row
 │                    (POST /spaces/ and POST /space/{s}/spaces)
-├── quota.mjs        the cap on Spaces created without a coupon; how a row was provisioned
+├── quota.mjs        the cap on Spaces created without a coupon; the limit on the Spaces of
+│                    one account; how a row was provisioned
 ├── store.mjs        S3 (conditional writes, listings)
 └── ops/             only what more than one endpoint runs: the policy operations
                      (three lambdas each), the content write (put and create),
@@ -736,10 +770,9 @@ response deliberately says only `404`.
 
 - **No replay protection.** A captured signed request can be replayed until
   its `expires` passes.
-- **No limit on the Spaces of one account.** An account Space's controller
-  creates any number of Spaces under it. Each row records its account
-  (`account`), so a per-account limit can be added without changing the
-  rows.
+- **One limit for every account.** `MaxSpacesPerAccount` is the same for a
+  wallet, which needs a handful, and an issuer, which needs one per batch.
+  A limit carried by the coupon would let the two differ.
 - **Unlock Spaces are created without a coupon** by any key holder, bounded
   only by `MaxCouponlessSpaces` (see the cap section above). Close the path
   with `MaxCouponlessSpaces=0` once FreeWallet no longer needs it.

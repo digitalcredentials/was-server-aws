@@ -45,6 +45,14 @@ Parameters:
     Type: String
     Description: How many Spaces one did:key may create by id under open provisioning.
     Default: "20"
+  # The limit on the Spaces of one account: how many Spaces created under
+  # an account Space (POST /space/{s}/spaces) may exist at once, counted on
+  # the account Space's registry row. "0" closes that route. See README,
+  # "The limit on the Spaces of one account".
+  MaxSpacesPerAccount:
+    Type: String
+    Description: How many Spaces created under one account Space may exist at once; "0" closes the route.
+    Default: "100"
   # The cap on Spaces (and so S3 buckets) created without a coupon: unlock
   # Spaces, whose derived id any key holder can claim, and Spaces created
   # by id under open provisioning. Spaces created with a coupon, and the
@@ -94,6 +102,7 @@ Globals:
         OPEN_PROVISIONING: !Ref OpenProvisioning
         MAX_SPACES_PER_CONTROLLER: !Ref MaxSpacesPerController
         MAX_COUPONLESS_SPACES: !Ref MaxCouponlessSpaces
+        MAX_SPACES_PER_ACCOUNT: !Ref MaxSpacesPerAccount
 
 Resources:
   # Space-creation coupons, owned by this stack: one row per coupon string.
@@ -252,7 +261,8 @@ Resources:
             TableName: !Ref PwsSpacesTable
         - Statement:
             # A whole-registry sweep reconciles the coupon-less counter and
-            # backfills `provisioning` on older rows
+            # each account's count of the Spaces under it, and backfills
+            # `provisioning` on older rows
             - Effect: Allow
               Action:
                 - dynamodb:PutItem
@@ -768,7 +778,9 @@ Resources:
 
   # POST /space/{s}/spaces -- create a further Space under an account Space
   # (one a coupon was spent on), authorized by a capability on that Space
-  # and no coupon. The literal route wins over the {collection_id} one.
+  # and no coupon, within MaxSpacesPerAccount (the write policy's UpdateItem
+  # keeps the count on the account Space's row). The literal route wins over
+  # the {collection_id} one.
   SpaceSpacesPostFn:
     Type: AWS::Serverless::Function
     Properties:
@@ -867,7 +879,8 @@ Resources:
       Policies:
         - Statement:
             # GetItem reads how the Space was provisioned; UpdateItem gives a
-            # coupon-less Space's slot back to the cap's counter
+            # coupon-less Space's slot back to the cap's counter, and the
+            # place of a Space created under an account back to that account
             - Effect: Allow
               Action:
                 - dynamodb:GetItem

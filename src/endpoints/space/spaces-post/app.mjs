@@ -4,7 +4,7 @@ import { json, parseJsonBody, NO_STORE } from "was-lib/http.mjs";
 import { spaceUrl } from "was-lib/meta.mjs";
 import { HttpProblem, invalidRequestBody } from "was-lib/problems.mjs";
 import { chooseSpaceId, provisionSpace, spaceRequestOf } from "was-lib/provision.mjs";
-import { isAccountRow } from "was-lib/quota.mjs";
+import { isAccountRow, releaseAccountSpace, reserveAccountSpace } from "was-lib/quota.mjs";
 
 // POST /space/{s}/spaces -- create a further Space under an account Space.
 //
@@ -27,6 +27,11 @@ import { isAccountRow } from "was-lib/quota.mjs";
 // The new Space is not an account Space: its registry row records
 // `provisioning: "account"` and the account Space it was created under
 // (`account`), and nothing can be created under it.
+//
+// An account holds at most `MAX_SPACES_PER_ACCOUNT` Spaces created this way
+// at once (was-lib/quota.mjs): each creation takes a place counted on the
+// account Space's row, a deletion gives it back, and past the limit the
+// answer is 507 quota-exceeded.
 
 const dynamo = new DynamoDBClient({});
 const SPACES_TABLE = process.env.SPACES_TABLE_NAME ?? "pws-spaces";
@@ -51,8 +56,18 @@ export const lambdaHandler = handler(
       throw invalidRequestBody("The request is not authorized by the stated controller.");
     }
 
+    // The id is settled before a place under the account's limit is taken,
+    // so a conflict costs nothing; the place is given back if the creation
+    // fails
     const { spaceId, chosen } = await chooseSpaceId(id);
-    const written = await provisionSpace(req, { spaceId, chosen, controller, name, type, provisioning: "account", account: registryUrl });
+    await reserveAccountSpace(registryUrl);
+    let written;
+    try {
+      written = await provisionSpace(req, { spaceId, chosen, controller, name, type, provisioning: "account", account: registryUrl });
+    } catch (err) {
+      await releaseAccountSpace(registryUrl).catch(() => {});
+      throw err;
+    }
 
     return json(req, 201, written.doc, {
       ...NO_STORE,
