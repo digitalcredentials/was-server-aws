@@ -37,7 +37,8 @@ Parameters:
       "true" lets any did:key create a Space by id with PUT /space/{id}/meta
       and If-None-Match: * (the reference client's create-by-id, which a
       FreeWallet account needs), within MaxSpacesPerController; "false" keeps
-      Space creation to POST /spaces/ with a coupon and the unlock Spaces.
+      Space creation to POST /spaces/ with a coupon, the Spaces created
+      under such a Space, and the unlock Spaces.
     Default: "false"
     AllowedValues: ["true", "false"]
   MaxSpacesPerController:
@@ -46,9 +47,9 @@ Parameters:
     Default: "20"
   # The cap on Spaces (and so S3 buckets) created without a coupon: unlock
   # Spaces, whose derived id any key holder can claim, and Spaces created
-  # by id under open provisioning. Spaces created with a coupon never
-  # count. "0" closes both paths. See README, "The cap on Spaces created
-  # without a coupon".
+  # by id under open provisioning. Spaces created with a coupon, and the
+  # Spaces created under one of those, never count. "0" closes both paths.
+  # See README, "The cap on Spaces created without a coupon".
   MaxCouponlessSpaces:
     Type: String
     Description: How many Spaces may exist that were created without a coupon; "0" closes those paths.
@@ -97,7 +98,9 @@ Globals:
 Resources:
   # Space-creation coupons, owned by this stack: one row per coupon string.
   # Optional attributes: usesRemaining (N; absent = unlimited) and expiresAt
-  # (ISO timestamp; absent = never). POST /spaces/ redeems a coupon from here;
+  # (ISO timestamp; absent = never). POST /spaces/ redeems a coupon from here,
+  # once per account: the Space it creates is the account Space, and the
+  # account's further Spaces are created under it with no coupon;
   # whoever administers the deployment mints rows (the wallet back end seeds
   # its registration code as an unlimited coupon).
   PwsCouponsTable:
@@ -685,8 +688,9 @@ Resources:
             Auth:
               Authorizer: NONE
 
-  # POST /spaces/ -- provision a Space: a bucket with its metadata object, a
-  # registry row, and a redeemed coupon.
+  # POST /spaces/ -- provision an account Space: a bucket with its metadata
+  # object, a registry row, and a redeemed coupon. The further Spaces of the
+  # account are created under it (SpaceSpacesPostFn), with no coupon.
   SpacesPostFn:
     Type: AWS::Serverless::Function
     Properties:
@@ -761,6 +765,39 @@ Resources:
             ApiId: !Ref WASHttpApi
             Path: /spaces/{p}
             Method: head
+
+  # POST /space/{s}/spaces -- create a further Space under an account Space
+  # (one a coupon was spent on), authorized by a capability on that Space
+  # and no coupon. The literal route wins over the {collection_id} one.
+  SpaceSpacesPostFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/endpoints/space/spaces-post
+      Handler: app.lambdaHandler
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref PwsSpacesTable
+        - Statement:
+            # The account Space's row, and a client-chosen id checked
+            # against the registry
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt PwsSpacesTable.Arn
+            - Effect: Allow
+              Action:
+                - s3:CreateBucket
+                - s3:PutBucketNotification
+              Resource: arn:aws:s3:::dcc-pws-*
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: arn:aws:s3:::dcc-pws-*/meta/space.json
+      Events:
+        Post:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WASHttpApi
+            Path: /space/{space_id}/spaces
+            Method: post
 
   # GET /space/{s}/ -- the Space's Collections. The gateway delivers the
   # trailing-slash container URL to the {collection_id} route with an empty

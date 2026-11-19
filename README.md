@@ -19,7 +19,7 @@ to the canonical one.
 | Method | Path | Function | Operation |
 | --- | --- | --- | --- |
 | GET, HEAD | `/service`, `/` | `ServiceGetFn` | the service description (discovery; no authorization) |
-| POST | `/spaces/` | `SpacesPostFn` | provision a Space (`{controller, name?, type?, coupon, id?}`) |
+| POST | `/spaces/` | `SpacesPostFn` | provision an account Space with a coupon (`{controller, name?, type?, coupon, id?}`) |
 | GET | `/spaces/` | `SpacesGetFn` | list the caller's Spaces |
 | GET | `/space/{s}/` | `SpaceCollectionsGetFn` | list the Space's Collections |
 | POST | `/space/{s}/` | `CollectionCreateFn` | create a Collection (`{id?, name?, encryption?, ...}`) |
@@ -29,6 +29,7 @@ to the canonical one.
 | GET / PUT / DELETE | `/space/{s}/policy` | `SpacePolicy{Get,Put,Delete}Fn` | the Space's access-control policy |
 | POST | `/space/{s}/export` | `SpaceExportFn` | the Space as a Space archive (tar) |
 | POST | `/space/{s}/import` | `SpaceImportFn` | merge a Space archive into the Space |
+| POST | `/space/{s}/spaces` | `SpaceSpacesPostFn` | create a further Space under an account Space, with no coupon (`{controller, name?, type?, id?}`) |
 | POST | `/space/{s}/zcaps/revocations/{id}` | `SpaceRevocationPostFn` | revoke a delegated capability rooted in the Space (the body is the capability) |
 | GET | `/space/{s}/{c}/` | `ResourceGetFn` | list the Collection's Resources |
 | POST | `/space/{s}/{c}/` | `ResourceCreateFn` | create a Resource with a server-assigned id |
@@ -69,28 +70,81 @@ built on a base server URL (pws-client 0.105+, FreeWallet) reads
 
 ### Spaces Repository
 
-**POST /spaces/** provisions a Space. Per the spec the request must be
-authorized by the `controller` DID named in the body: the authorizer
+**POST /spaces/** provisions an account Space. Per the spec the request
+must be authorized by the `controller` DID named in the body: the authorizer
 verifies the invocation against the DID that signed it, and the function
-requires that DID to be the stated controller. This server adds a `coupon`,
-redeemed from the `pws-coupons` table (optional `usesRemaining` and
-`expiresAt`; an unknown, spent or expired coupon is a `403`). `type` is the
-Space's type array (default `["Space"]`; the wallet marks batch spaces
-`["Space", "BatchSpace"]`); `name` is kept in the Space Metadata and mirrored
-to the registry for listings. The server assigns the id (`dcc-pws-{uuid}`,
-also the bucket name) unless the body names one: a wallet built on
-wallet-core mints its account Space's id before genesis (43 URL-safe
-characters), redeems the coupon here with that `id`, and genesis then finds
-the Space in place, since its provisioning step is an ensure. A client id
-must be a valid id form, not reserved, and not in use (`409 id-conflict`);
-its bucket is `bucketOf(id)`. Either way the server creates the bucket with
-`meta/space.json`, registers the Space, and answers `201` with `Location`
-and the metadata. Mint coupons directly:
+requires that DID to be the stated controller. This server adds a `coupon`
+(a registration code), redeemed from the `pws-coupons` table (optional
+`usesRemaining` and `expiresAt`; an unknown, spent or expired coupon is a
+`403 coupon-required`). `type` is the Space's type array (default
+`["Space"]`); `name` is kept in the Space Metadata and mirrored to the
+registry for listings. The server assigns the id (`dcc-pws-{uuid}`, also the
+bucket name) unless the body names one: a wallet built on wallet-core mints
+its account Space's id before genesis (43 URL-safe characters), redeems the
+coupon here with that `id`, and genesis then finds the Space in place, since
+its provisioning step is an ensure. A client id must be a valid id form, not
+reserved, and not in use (`409 id-conflict`); its bucket is `bucketOf(id)`.
+Either way the server creates the bucket with `meta/space.json`, registers
+the Space, and answers `201` with `Location` and the metadata. Mint coupons
+directly:
 
 ```sh
 aws dynamodb put-item --table-name pws-coupons --item \
   '{"coupon":{"S":"<secret>"},"usesRemaining":{"N":"5"},"expiresAt":{"S":"2027-01-01T00:00:00Z"}}'
 ```
+
+A coupon is spent once per account, here. `usesRemaining` therefore counts
+accounts: a coupon with five uses registers five wallets or issuers, however
+many Spaces each of them goes on to create.
+
+### Spaces under an account
+
+A Space a coupon was spent on is an **account Space** (its registry row
+records `provisioning: "coupon"`): a wallet's account Space, the batch
+issuer's issuer Space. Every further Space of the account is created under
+it, with no coupon:
+
+**POST /space/{s}/spaces** takes the body of `POST /spaces/` without the
+coupon (`{controller, name?, type?, id?}`) and answers the same `201`. What
+authorizes it is a capability on the account Space:
+
+- its root capability, invoked by the account Space's controller (the batch
+  issuer's `did:key` creating a batch Space);
+- or a delegated capability whose last link targets exactly
+  `/space/{s}/spaces` and allows exactly `POST`. A data grant on the Space
+  that happens to carry `POST` is refused (the container rule,
+  [src/authorizer/container.mjs](src/authorizer/container.mjs)); its holder
+  mints the `POST`-only child instead.
+
+As at `POST /spaces/`, the stated `controller` is a `did:key` and is the DID
+that signed the request, so a Space is only ever created under a controller
+that signed for it. An account whose controller is not the key the new Space
+is for therefore delegates. That is how a wallet creates the unlock Space of
+a sign-in method it adds, whose controller is a `did:key` derived from that
+credential:
+
+- a passkey session signs as the account (a `did:webvh`): its key delegates
+  the `POST`-only capability to the credential's `did:key`, which invokes it;
+- a passphrase session signs as the account's client annex under the
+  generation delegation, a grant on the whole account Space: its per-visit
+  key narrows that into the `POST`-only capability for the credential's
+  `did:key`. The account's delegation-only (ladder) key cannot hand the
+  capability out itself, since the client-annex clause admits no such shape.
+
+The delegated capability is revoked and expires like any other on the Space,
+and removing a sign-in method removes what it could delegate.
+
+Refusals: `403` with type
+`https://github.com/digitalcredentials/was-server-aws#account-required` when
+the Space in the URL is not an account Space (a Space created under an
+account is not one, nor is an unlock Space created without a coupon); `400`
+when the stated controller is not the signer or the body is malformed; `404`
+for a capability that does not verify; `401` unsigned.
+
+The new Space's registry row records `provisioning: "account"` and the
+account Space it was created under (`account`). `spaces` is reserved at the
+collection position of every Space on this server (a Collection cannot take
+the id), beside the spec's own reserved segments.
 
 **GET /spaces/** lists the Spaces registered to the DID that signed the
 request (the registry's `by-did` index), paged. An unsigned or unverifiable
@@ -138,9 +192,9 @@ hand-off.
 
 ### Provisioning a Space by id
 
-Besides `POST /spaces/` (a coupon, a server-assigned id) and the unlock
-Spaces (an id derived from the signing did:key), the stack can let any
-did:key create a Space by id: `PUT /space/{id}/meta` with
+Besides `POST /spaces/` (a coupon), `POST /space/{s}/spaces` (under an
+account Space) and the unlock Spaces (an id derived from the signing
+did:key), the stack can let any did:key create a Space by id: `PUT /space/{id}/meta` with
 `If-None-Match: *` and a body naming the key as `controller`, which is how
 the reference client (pws-client, wallet-core, FreeWallet) creates an
 account Space. It is off by default; the `OpenProvisioning` parameter
@@ -158,10 +212,11 @@ of a did:key can create an unlock Space, and so an S3 bucket, with no
 coupon and no account, because an unlock Space is created before the
 account it will point at is known to the server. FreeWallet depends on it
 (binding a passphrase or passkey creates one), so it stays open while
-FreeWallet clients join accounts on this server. Our own wallet creates
-every Space it needs, unlock Spaces included, through `POST /spaces/` with
-the coupon (a client-chosen `id`, see above), so it is not subject to the
-cap. When FreeWallet no longer needs the path, close it by deploying with
+FreeWallet clients join accounts on this server. Our own wallet and the
+batch issuer create their account Space through `POST /spaces/` with the
+coupon and every other Space, unlock Spaces included, under that account
+(`POST /space/{s}/spaces`), so neither is subject to the cap. When
+FreeWallet no longer needs the path, close it by deploying with
 `MaxCouponlessSpaces=0`.
 
 What bounds it:
@@ -171,7 +226,8 @@ What bounds it:
   (`urn:pws-server:couponless-spaces`) is reserved with a conditional
   increment before such a bucket is created and released when such a Space
   is deleted; past the cap the creation is `507 quota-exceeded`. Each
-  registry row records `provisioning` (`coupon`, `derived`, `open`).
+  registry row records `provisioning` (`coupon`, `account`, `derived`,
+  `open`); only the last two count.
 - `QuotaWatchFn` runs hourly (and by hand: `aws lambda invoke
   --function-name <stack>-QuotaWatchFn-... --payload '{}' out.json`),
   publishing `PwsServer/CouponlessSpaces` and `PwsServer/SpaceBuckets`.
@@ -559,7 +615,9 @@ s3://{space_id}/
 
 The registry (`pws-spaces`, the `PwsSpacesTable` of this stack) has one row
 per Space: `spaceURL` (no trailing slash), `did`, `type` (a list), `name`,
-`CreatedAt`, with a `by-did` index for the listing. The authorizer reads it
+`CreatedAt`, `provisioning` (how the Space came to exist) and, for a Space
+created under an account, `account` (that account Space's `spaceURL`), with
+a `by-did` index for the listing. The authorizer reads it
 on every request and the Space functions write it. lcw-back-end's
 registration and login still use it by name, an interim that stage 3 of the
 did:webvh work removes.
@@ -575,22 +633,24 @@ layers/was-lib/nodejs/node_modules/was-lib/   the shared layer (plain ESM, no de
 ├── meta.mjs         reading and composing the metadata objects (used by several endpoints)
 ├── policy.mjs       PublicCanRead evaluation
 ├── problems.mjs     problem types
+├── provision.mjs    creating a Space from a body: id choice, bucket, metadata, registry row
+│                    (POST /spaces/ and POST /space/{s}/spaces)
+├── quota.mjs        the cap on Spaces created without a coupon; how a row was provisioned
 ├── store.mjs        S3 (conditional writes, listings)
 └── ops/             only what more than one endpoint runs: the policy operations
                      (three lambdas each), the content write (put and create),
                      pagination helpers
-                     Everything a single endpoint does -- the registry row writes,
-                     bucket creation and deletion, coupons, the annotation write --
-                     is in that endpoint's own file.
+                     Everything a single endpoint does -- coupons, bucket deletion,
+                     the annotation write -- is in that endpoint's own file.
 src/authorizer/      the verification stack (bundled): app.mjs the gateway authorizer,
-│                    zcap.mjs verification, chain.mjs + revocations.mjs + annex.mjs the
-│                    chain inspectors, revoke.mjs the revocation endpoint
+│                    zcap.mjs verification, chain.mjs + revocations.mjs + annex.mjs +
+│                    container.mjs the chain inspectors, revoke.mjs the revocation endpoint
 src/endpoints/       one directory per endpoint, grouped by what the route addresses;
 │                    each app.mjs is that endpoint's operation
 ├── service/get
 ├── spaces/          post, get
 ├── space/           collections-get, collection-create, delete, meta-get, meta-put,
-│                    policy-get, policy-put, policy-delete
+│                    policy-get, policy-put, policy-delete, export, import, spaces-post
 ├── collection/      meta-get, meta-put, policy-get, policy-put, policy-delete
 ├── resource/        get, create, put, delete, meta-get, meta-put,
 │                    policy-get, policy-put, policy-delete
@@ -601,7 +661,7 @@ test/
 ├── fakes.mjs        in-memory S3 and DynamoDB
 ├── harness.mjs      signed events, the way the client signs them
 └── live.mjs         conformance check through @interop/was-client against a deployment
-template.yaml        all AWS resources: the API, the authorizer, the layer, 27 functions
+template.yaml        all AWS resources: the API, the authorizer, the layer, a function per endpoint
 ```
 
 Handlers import the layer as `was-lib/...`; in Lambda that resolves from
@@ -658,8 +718,10 @@ deployment, through `@interop/was-client` itself: discovery, a scratch
 Space, Space and Collection metadata with compare-and-swap, an encrypted
 collection (`createCollection` + `ensureFirstEpoch`, `add`, `get`, encrypted
 `setName`), plaintext resources with validators, resource metadata,
-policies and public reads, listings, deletes. The Space it creates is
-deleted at the end. Run it after every deploy.
+policies and public reads, listings, deletes, and Spaces created under the
+scratch Space (by its controller, and by a key holding the `POST`-only
+grant). The Spaces it creates are deleted at the end. Run it after every
+deploy.
 
 ## Logs
 
@@ -674,6 +736,10 @@ response deliberately says only `404`.
 
 - **No replay protection.** A captured signed request can be replayed until
   its `expires` passes.
+- **No limit on the Spaces of one account.** An account Space's controller
+  creates any number of Spaces under it. Each row records its account
+  (`account`), so a per-account limit can be added without changing the
+  rows.
 - **Unlock Spaces are created without a coupon** by any key holder, bounded
   only by `MaxCouponlessSpaces` (see the cap section above). Close the path
   with `MaxCouponlessSpaces=0` once FreeWallet no longer needs it.
